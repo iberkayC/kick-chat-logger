@@ -33,8 +33,8 @@ The tool connects to Kick.com's WebSocket to log live chat events in real time. 
 
 1. **Clone the repository**:
    ```
-   git clone https://github.com/iberkayC/kick-chat-logger.git
-   cd kick-chat-logger
+   git clone https://github.com/iberkayC/kick-chat-logger
+   cd kick-chat-logger/src
    ```
 
 2. **Use a virtual environment**:
