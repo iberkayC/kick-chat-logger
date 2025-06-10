@@ -1,0 +1,5 @@
+aiofiles==24.1.0
+aiosqlite==0.21.0
+aioconsole==0.8.1
+curl-cffi==0.10.0
+websockets==15.0.1 
