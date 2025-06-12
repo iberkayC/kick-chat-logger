@@ -98,6 +98,7 @@ Each channel gets its own table (prefixed with `kickchat_` on default) containin
 - The logging is not the best, gets the job done.
 - Before all websocket connection closeds were handled, sometimes the `PAUSED` and `SCRAPING` states were not synchronized. Now, it's probably fixed, but they are not explicitly synchronized. So, one might need to resume manually even though the channel is already resumed. Retrying till connected is not a good idea, because of bans, name changes, etc. The synchronization fix is not hard, but I didn't do it as a choice.
 - If you are scraping a lot of channels, the startup is slow, this is not really fixable, but one might want to make it run on the background and allow CLI input.
+- SQLite limitations only allow one writer at a time, so at high traffic the application gets database locked errors. To fix, we need to ditch SQLite or make a writer queue.
 
 ## Contact
 
