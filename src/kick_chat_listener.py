@@ -44,7 +44,7 @@ async def listen_to_chat(
     chatroom_id = await get_chatroom_id(channel_name)
 
     last_ping_time = time.time()
-    ping_interval = PING_INTERVAL_MINUTES * 60
+    ping_interval = PING_INTERVAL_MINUTES * 20
     ping_timeout = 30  # seconds to wait for pong response
     consecutive_ping_failures = 0
     max_ping_failures = 3
@@ -63,7 +63,6 @@ async def listen_to_chat(
             while stop_event is None or not stop_event.is_set():
                 # Use asyncio.wait_for with timeout to make recv() cancellable
                 try:
-                    # Enhanced ping/pong mechanism with timeout detection
                     current_time = time.time()
                     if current_time - last_ping_time > ping_interval:
                         try:
@@ -76,15 +75,26 @@ async def listen_to_chat(
                         except asyncio.TimeoutError:
                             consecutive_ping_failures += 1
                             logger.warning(
-                                "Ping timeout for %s (failure %d/%d)", 
-                                channel_name, consecutive_ping_failures, max_ping_failures
+                                "Ping timeout for %s (failure %d/%d)",
+                                channel_name,
+                                consecutive_ping_failures,
+                                max_ping_failures,
                             )
                             if consecutive_ping_failures >= max_ping_failures:
-                                logger.error("Max ping failures reached for %s, closing connection", channel_name)
-                                raise websockets.exceptions.ConnectionClosed(1011, "Ping timeout")
-                            last_ping_time = current_time  # Reset to avoid immediate retry
+                                logger.error(
+                                    "Max ping failures reached for %s, closing connection",
+                                    channel_name,
+                                )
+                                raise websockets.exceptions.ConnectionClosed(
+                                    1011, "Ping timeout"
+                                )
+                            last_ping_time = (
+                                current_time  # Reset to avoid immediate retry
+                            )
                         except websockets.exceptions.ConnectionClosed:
-                            logger.warning("Connection lost during ping for %s", channel_name)
+                            logger.warning(
+                                "Connection lost during ping for %s", channel_name
+                            )
                             raise
 
                     message_raw = await asyncio.wait_for(ws.recv(), timeout=1.0)

@@ -94,20 +94,25 @@ class KickChatLogger:
                 break
             except websockets.exceptions.ConnectionClosed as e:
                 connection_retry_count += 1
-                
-                # Check if this is a critical error that needs longer backoff
-                error_code = getattr(e, 'code', None)
+
+                # Check if this is a common error that needs longer backoff
+                error_code = getattr(e, "code", None)
                 if error_code in [4200, 1011]:  # Server restart or ping timeout
                     if connection_retry_count > max_connection_retries:
                         logger.error(
-                            "Max connection retries exceeded for channel %s (error %s), stopping", 
-                            channel_name, error_code
+                            "Max connection retries exceeded for channel %s (error %s), stopping",
+                            channel_name,
+                            error_code,
                         )
                         break
-                    
+
                     # Start at 1s, cap at 30s, with 30s max delay for persistent connection issues
                     if connection_retry_count <= 10:
-                        delay = min(connection_base_delay * (1.5 ** min(connection_retry_count, 8)), 30)
+                        delay = min(
+                            connection_base_delay
+                            * (1.5 ** min(connection_retry_count, 8)),
+                            30,
+                        )
                     else:
                         delay = 30  # Max delay for persistent connection issues
                     logger.warning(
@@ -123,7 +128,8 @@ class KickChatLogger:
                     retry_count += 1
                     if retry_count > max_retries:
                         logger.error(
-                            "Max retries exceeded for channel %s, stopping", channel_name
+                            "Max retries exceeded for channel %s, stopping",
+                            channel_name,
                         )
                         break
                     delay = base_delay * (2 ** (retry_count - 1))
@@ -141,7 +147,7 @@ class KickChatLogger:
                     break
                 except asyncio.TimeoutError:
                     pass
-                    
+
             except Exception as e:
                 retry_count += 1
                 if retry_count > max_retries:
