@@ -80,7 +80,7 @@ class KickChatStorage:
 
     async def _enable_wal_mode(self, db: aiosqlite.Connection) -> bool:
         """
-        Enables WAL (Write-Ahead Logging) mode for better concurrent access.
+        Enables WAL mode for better concurrent access.
         
         Args:
             db (aiosqlite.Connection): The database connection

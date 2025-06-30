@@ -79,20 +79,69 @@ class KickChatLogger:
             None
         """
         retry_count = 0
-        max_retries = 5
-        base_delay = 5
+        connection_retry_count = 0
+        max_retries = 10
+        max_connection_retries = 50
+        base_delay = 2
+        connection_base_delay = 1
 
         while not stop_event.is_set() and self.running:
             try:
                 await listen_to_chat(channel_name, self.storage, stop_event)
-                break
-            except websockets.exceptions.ConnectionClosed:
-                # retries in case of error 4200, immediate retry
-                # sometimes the ping doesn't go through completely or on time, so error 1011
-                # sometimes, the tcp connection is lost and no frame is received
-                # etc. in each case, we should retry.
+                # Reset counters on successful connection
                 retry_count = 0
-                continue
+                connection_retry_count = 0
+                break
+            except websockets.exceptions.ConnectionClosed as e:
+                connection_retry_count += 1
+                
+                # Check if this is a critical error that needs longer backoff
+                error_code = getattr(e, 'code', None)
+                if error_code in [4200, 1011]:  # Server restart or ping timeout
+                    if connection_retry_count > max_connection_retries:
+                        logger.error(
+                            "Max connection retries exceeded for channel %s (error %s), stopping", 
+                            channel_name, error_code
+                        )
+                        break
+                    
+                    # Start at 1s, cap at 30s, with 30s max delay for persistent connection issues
+                    if connection_retry_count <= 10:
+                        delay = min(connection_base_delay * (1.5 ** min(connection_retry_count, 8)), 30)
+                    else:
+                        delay = 30  # Max delay for persistent connection issues
+                    logger.warning(
+                        "WebSocket connection closed for %s (error %s, attempt %d/%d). Retrying in %.1f seconds...",
+                        channel_name,
+                        error_code,
+                        connection_retry_count,
+                        max_connection_retries,
+                        delay,
+                    )
+                else:
+                    # Unknown connection error, treat as regular retry
+                    retry_count += 1
+                    if retry_count > max_retries:
+                        logger.error(
+                            "Max retries exceeded for channel %s, stopping", channel_name
+                        )
+                        break
+                    delay = base_delay * (2 ** (retry_count - 1))
+                    logger.warning(
+                        "Connection error for %s (attempt %d/%d): %s. Retrying in %d seconds...",
+                        channel_name,
+                        retry_count,
+                        max_retries,
+                        e,
+                        delay,
+                    )
+
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=delay)
+                    break
+                except asyncio.TimeoutError:
+                    pass
+                    
             except Exception as e:
                 retry_count += 1
                 if retry_count > max_retries:

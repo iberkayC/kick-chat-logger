@@ -45,6 +45,9 @@ async def listen_to_chat(
 
     last_ping_time = time.time()
     ping_interval = PING_INTERVAL_MINUTES * 60
+    ping_timeout = 30  # seconds to wait for pong response
+    consecutive_ping_failures = 0
+    max_ping_failures = 3
 
     if not chatroom_id:
         logger.error("Failed to get chatroom ID for %s", channel_name)
@@ -60,12 +63,29 @@ async def listen_to_chat(
             while stop_event is None or not stop_event.is_set():
                 # Use asyncio.wait_for with timeout to make recv() cancellable
                 try:
-                    # Ping every 90 minutes to keep the connection alive
+                    # Enhanced ping/pong mechanism with timeout detection
                     current_time = time.time()
                     if current_time - last_ping_time > ping_interval:
-                        await ws.ping()
-                        last_ping_time = current_time
-                        logger.debug("Sent ping to %s", channel_name)
+                        try:
+                            # Send ping and wait for pong with timeout
+                            pong_waiter = await ws.ping()
+                            await asyncio.wait_for(pong_waiter, timeout=ping_timeout)
+                            last_ping_time = current_time
+                            consecutive_ping_failures = 0
+                            logger.debug("Ping/pong successful for %s", channel_name)
+                        except asyncio.TimeoutError:
+                            consecutive_ping_failures += 1
+                            logger.warning(
+                                "Ping timeout for %s (failure %d/%d)", 
+                                channel_name, consecutive_ping_failures, max_ping_failures
+                            )
+                            if consecutive_ping_failures >= max_ping_failures:
+                                logger.error("Max ping failures reached for %s, closing connection", channel_name)
+                                raise websockets.exceptions.ConnectionClosed(1011, "Ping timeout")
+                            last_ping_time = current_time  # Reset to avoid immediate retry
+                        except websockets.exceptions.ConnectionClosed:
+                            logger.warning("Connection lost during ping for %s", channel_name)
+                            raise
 
                     message_raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
                     message = json.loads(message_raw)
