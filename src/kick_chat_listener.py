@@ -9,11 +9,12 @@ import time
 import asyncio
 from typing import Dict, Any, Optional
 import websockets
+from websockets import Close
 import aiofiles
 
 
 from kick_api import get_channel_info
-from storage import KickChatStorage
+from storage.sqlite_storage import KickChatStorage
 from kick_event import KickEvent
 from config import (
     WEBSOCKET_URL,
@@ -86,7 +87,7 @@ async def listen_to_chat(
                                     channel_name,
                                 )
                                 raise websockets.exceptions.ConnectionClosed(
-                                    1011, "Ping timeout"
+                                    sent=Close(1011, "Ping timeout"), rcvd=None
                                 )
                             last_ping_time = (
                                 current_time  # Reset to avoid immediate retry
@@ -156,7 +157,9 @@ async def get_chatroom_id(channel_name: str) -> Optional[str]:
         )
         return None
 
-    return channel_info_result.data.get("chatroom", {}).get("id")
+    if isinstance(channel_info_result.data, dict):
+        return channel_info_result.data.get("chatroom", {}).get("id")
+    return None
 
 
 async def parse_event(message: Dict[str, Any]) -> KickEvent:
@@ -171,6 +174,9 @@ async def parse_event(message: Dict[str, Any]) -> KickEvent:
         KickEvent: Parsed event data
     """
     event_type = message.get("event")
+    if not isinstance(event_type, str):
+        raise ValueError(f"Invalid event type: {event_type}")
+    
     data_str = message.get("data", "{}")
     if isinstance(data_str, str):
         parsed_data = json.loads(data_str)

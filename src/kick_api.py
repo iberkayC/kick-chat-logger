@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT = 10
 
 
-@dataclass
+@dataclass(frozen=True)
 class ApiResult:
     """
     Result object for API calls.

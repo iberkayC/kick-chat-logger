@@ -11,7 +11,7 @@ import websockets
 
 from kick_api import get_channel_info
 from kick_chat_listener import listen_to_chat
-from storage import KickChatStorage
+from storage.sqlite_storage import KickChatStorage
 
 logging.basicConfig(
     level=logging.INFO,
