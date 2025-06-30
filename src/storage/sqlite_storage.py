@@ -25,7 +25,7 @@ from utils.data_preparation import prepare_event_data
 logger = logging.getLogger(__name__)
 
 
-class KickChatStorage(StorageInterface):
+class SQLiteStorage(StorageInterface):
     """
     Handles database storage for Kick chat events.
     """

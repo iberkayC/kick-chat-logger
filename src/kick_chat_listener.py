@@ -14,7 +14,7 @@ import aiofiles
 
 
 from kick_api import get_channel_info
-from storage.sqlite_storage import KickChatStorage
+from storage.sqlite_storage import SQLiteStorage
 from kick_event import KickEvent
 from config import (
     WEBSOCKET_URL,
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 async def listen_to_chat(
     channel_name: str,
-    storage: KickChatStorage,
+    storage: SQLiteStorage,
     stop_event: Optional[asyncio.Event] = None,
 ) -> None:
     """
