@@ -46,10 +46,10 @@ def get_channel_table_name(channel_name: str) -> str:
 def normalize_timestamp(timestamp) -> Optional[str]:
     """
     Normalizes timestamps to ISO format with UTC timezone.
-    Handles both string timestamps and unix timestamps.
+    Handles datetime objects, string timestamps, and unix timestamps.
 
     Args:
-        timestamp (str): The timestamp to normalize
+        timestamp (datetime, str, int, float): The timestamp to normalize
 
     Returns:
         Optional[str]: The normalized timestamp, or None if the timestamp is invalid
@@ -58,7 +58,10 @@ def normalize_timestamp(timestamp) -> Optional[str]:
         return None
 
     try:
-        if isinstance(timestamp, (int, float)):
+        if isinstance(timestamp, datetime):
+            # Handle datetime objects directly
+            return timestamp.isoformat() + "Z"
+        elif isinstance(timestamp, (int, float)):
             return datetime.fromtimestamp(timestamp, UTC).isoformat() + "Z"
         elif isinstance(timestamp, str):
             # already a string, assume it's properly formatted
