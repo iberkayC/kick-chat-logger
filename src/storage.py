@@ -69,12 +69,35 @@ class KickChatStorage:
                 logger.info("Created database directory: %s", db_dir)
 
             async with aiosqlite.connect(self.db_path) as db:
+                await self._enable_wal_mode(db)
                 await self._create_channels_table(db)
 
             logger.info("Database initialized successfully")
             return True
         except (sqlite3.Error, OSError) as e:
             logger.error("Failed to initialize database: %s", e)
+            return False
+
+    async def _enable_wal_mode(self, db: aiosqlite.Connection) -> bool:
+        """
+        Enables WAL (Write-Ahead Logging) mode for better concurrent access.
+        
+        Args:
+            db (aiosqlite.Connection): The database connection
+            
+        Returns:
+            bool: True if WAL mode was enabled successfully, False otherwise
+        """
+        try:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute("PRAGMA synchronous=NORMAL")
+            await db.execute("PRAGMA cache_size=10000")
+            await db.execute("PRAGMA temp_store=memory")
+            await db.commit()
+            logger.info("WAL mode and performance optimizations enabled")
+            return True
+        except sqlite3.Error as e:
+            logger.error("Failed to enable WAL mode: %s", e)
             return False
 
     async def _create_channels_table(self, db: aiosqlite.Connection) -> bool:
