@@ -156,7 +156,7 @@ class KickChatLogger:
                     )
                     break
 
-                delay = max(base_delay * (2 ** (retry_count - 1)), 30)
+                delay = min(base_delay * (2 ** (retry_count - 1)), 30)
                 logger.warning(
                     "Error in channel %s (attempt %d/%d): %s. Retrying in %d seconds...",
                     channel_name,
