@@ -10,7 +10,7 @@ from config import KICK_API_V2_URL
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT = 10
+DEFAULT_TIMEOUT = 30
 
 
 @dataclass(frozen=True)

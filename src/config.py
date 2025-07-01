@@ -54,15 +54,25 @@ IGNORED_EVENTS = {
 
 UNHANDLED_MESSAGES_FILE = "unhandled_messages.txt"
 
-PING_INTERVAL_MINUTES = 60
+PING_INTERVAL_MINUTES = 10
 
 #### kick_api.py
 KICK_API_V2_URL = "https://kick.com/api/v2/channels/"
 
-#### storage.py
-# Database configuration
+#### Storage Configuration
+# Supported storage types: "sqlite", "postgresql"
+STORAGE_TYPE = "sqlite"
+
+#### SQLite Storage Configuration
 DEFAULT_DB_PATH = "database/kick_scraper.db"
 CHANNEL_TABLE_PREFIX = "kickchat_"
+
+#### PostgreSQL Storage Configuration
+DEFAULT_PG_HOST = "localhost"
+DEFAULT_PG_PORT = 5432
+DEFAULT_PG_DB = "kick_chat_logger"
+DEFAULT_PG_USER = "kickscraper"
+DEFAULT_PG_PASSWORD = "Myv3rys3cur3p4sw0rd!313!"
 
 # Content message templates
 SUBSCRIPTION_CONTENT_TEMPLATE = "{username} subscribed for {months} months"

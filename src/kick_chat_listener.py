@@ -45,10 +45,10 @@ async def listen_to_chat(
     chatroom_id = await get_chatroom_id(channel_name)
 
     last_ping_time = time.time()
-    ping_interval = PING_INTERVAL_MINUTES * 20
-    ping_timeout = 30  # seconds to wait for pong response
+    ping_interval = PING_INTERVAL_MINUTES * 60
+    ping_timeout = 60  # seconds to wait for pong response
     consecutive_ping_failures = 0
-    max_ping_failures = 3
+    max_ping_failures = 5
 
     if not chatroom_id:
         logger.error("Failed to get chatroom ID for %s", channel_name)

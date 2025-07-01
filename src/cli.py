@@ -11,7 +11,7 @@ import websockets
 
 from kick_api import get_channel_info
 from kick_chat_listener import listen_to_chat
-from storage.sqlite_storage import SQLiteStorage
+from storage.storage_factory import create_storage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,7 +30,7 @@ class KickChatLogger:
     """
 
     def __init__(self):
-        self.storage = SQLiteStorage()
+        self.storage = create_storage()
         self.active_tasks: Dict[str, asyncio.Task] = {}
         self.stop_events: Dict[str, asyncio.Event] = {}
         self.running = True
