@@ -30,6 +30,7 @@ def sanitize_channel_name(name: str) -> str:
 
     return sanitized
 
+
 def get_channel_table_name(channel_name: str) -> str:
     """
     Gets the table name for a channel.
@@ -42,6 +43,7 @@ def get_channel_table_name(channel_name: str) -> str:
     """
     sanitized = sanitize_channel_name(channel_name)
     return f"{CHANNEL_TABLE_PREFIX}{sanitized}"
+
 
 def normalize_timestamp(timestamp) -> Optional[str]:
     """

@@ -176,7 +176,7 @@ async def parse_event(message: Dict[str, Any]) -> KickEvent:
     event_type = message.get("event")
     if not isinstance(event_type, str):
         raise ValueError(f"Invalid event type: {event_type}")
-    
+
     data_str = message.get("data", "{}")
     if isinstance(data_str, str):
         parsed_data = json.loads(data_str)

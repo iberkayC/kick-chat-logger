@@ -3,6 +3,7 @@ This module handles database storage for Kick chat events.
 It manages SQLite database operations for storing chat messages, subscriptions,
 bans, and other events from Kick chat streams.
 """
+
 import logging
 import os
 from datetime import datetime, UTC
@@ -59,10 +60,10 @@ class SQLiteStorage(StorageInterface):
     async def _enable_wal_mode(self, db: aiosqlite.Connection) -> bool:
         """
         Enables WAL mode for better concurrent access.
-        
+
         Args:
             db (aiosqlite.Connection): The database connection
-            
+
         Returns:
             bool: True if WAL mode was enabled successfully, False otherwise
         """

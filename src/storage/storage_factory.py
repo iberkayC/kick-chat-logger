@@ -19,10 +19,10 @@ from config import (
 def create_storage() -> StorageInterface:
     """
     Create and return the appropriate storage instance based on configuration.
-    
+
     Returns:
         StorageInterface: The configured storage instance
-        
+
     Raises:
         ValueError: If the storage type is not supported
     """
