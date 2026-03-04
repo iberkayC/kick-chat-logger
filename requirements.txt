@@ -1,6 +1,7 @@
 aiofiles==24.1.0
 aiosqlite==0.21.0
-aioconsole==0.8.1
+prompt_toolkit==3.0.52
 curl-cffi==0.10.0
 websockets==15.0.1
-asyncpg==0.29.0 
+asyncpg==0.29.0
+rich==14.3.3
