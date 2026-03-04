@@ -66,6 +66,12 @@ class PostgreSQLStorage(StorageInterface):
         self.command_timeout = command_timeout
         self.pool: Optional[asyncpg.Pool] = None
 
+    @property
+    def _pool(self) -> asyncpg.Pool:
+        if self.pool is None:
+            raise RuntimeError("Storage not initialized. Call initialize() first.")
+        return self.pool
+
     async def initialize(self) -> bool:
         """
         Initializes the database connection pool and creates the channels table if it doesn't exist.
@@ -86,7 +92,7 @@ class PostgreSQLStorage(StorageInterface):
                 command_timeout=self.command_timeout,
             )
 
-            async with self.pool.acquire() as connection:
+            async with self._pool.acquire() as connection:
                 await self._create_channels_table(connection)
 
             logger.info("PostgreSQL database initialized successfully")
@@ -182,7 +188,7 @@ class PostgreSQLStorage(StorageInterface):
         timestamp = datetime.now(UTC)
 
         try:
-            async with self.pool.acquire() as connection:
+            async with self._pool.acquire() as connection:
                 await connection.execute(
                     "INSERT INTO channels (name, added_at) VALUES ($1, $2)",
                     normalized_name,
@@ -216,7 +222,7 @@ class PostgreSQLStorage(StorageInterface):
         """
 
         try:
-            async with self.pool.acquire() as connection:
+            async with self._pool.acquire() as connection:
                 rows = await connection.fetch(
                     "SELECT name, added_at, paused, paused_at FROM channels ORDER BY added_at DESC"
                 )
@@ -250,7 +256,7 @@ class PostgreSQLStorage(StorageInterface):
         normalized_name = sanitize_channel_name(channel_name)
 
         try:
-            async with self.pool.acquire() as connection:
+            async with self._pool.acquire() as connection:
                 result = await connection.fetchval(
                     "SELECT 1 FROM channels WHERE name = $1", normalized_name
                 )
@@ -299,7 +305,7 @@ class PostgreSQLStorage(StorageInterface):
         prepared_data = prepare_event_data(event)
 
         try:
-            async with self.pool.acquire() as connection:
+            async with self._pool.acquire() as connection:
                 insert_sql = f"""
                 INSERT INTO {table_name} (
                     event_type, event_id, chatroom_id, timestamp, user_id, username,
@@ -374,7 +380,7 @@ class PostgreSQLStorage(StorageInterface):
             return False
 
         try:
-            async with self.pool.acquire() as connection:
+            async with self._pool.acquire() as connection:
                 timestamp = datetime.now(UTC)
                 await connection.execute(
                     "UPDATE channels SET paused = $1, paused_at = $2 WHERE name = $3",
@@ -404,7 +410,7 @@ class PostgreSQLStorage(StorageInterface):
             return False
 
         try:
-            async with self.pool.acquire() as connection:
+            async with self._pool.acquire() as connection:
                 await connection.execute(
                     "UPDATE channels SET paused = $1 WHERE name = $2",
                     False,
@@ -425,7 +431,7 @@ class PostgreSQLStorage(StorageInterface):
             List[str]: List of active channel names
         """
         try:
-            async with self.pool.acquire() as connection:
+            async with self._pool.acquire() as connection:
                 rows = await connection.fetch(
                     "SELECT name FROM channels WHERE paused = FALSE ORDER BY added_at DESC"
                 )
@@ -443,7 +449,7 @@ class PostgreSQLStorage(StorageInterface):
             List[str]: List of paused channel names
         """
         try:
-            async with self.pool.acquire() as connection:
+            async with self._pool.acquire() as connection:
                 rows = await connection.fetch(
                     "SELECT name FROM channels WHERE paused = TRUE ORDER BY paused_at DESC"
                 )
@@ -461,7 +467,7 @@ class PostgreSQLStorage(StorageInterface):
             List[str]: List of all channel names
         """
         try:
-            async with self.pool.acquire() as connection:
+            async with self._pool.acquire() as connection:
                 rows = await connection.fetch(
                     "SELECT name FROM channels ORDER BY added_at DESC"
                 )
@@ -492,7 +498,7 @@ class PostgreSQLStorage(StorageInterface):
         table_name = get_channel_table_name(normalized_name)
 
         try:
-            async with self.pool.acquire() as connection:
+            async with self._pool.acquire() as connection:
                 event_counts_rows = await connection.fetch(
                     f"""
                     SELECT event_type, COUNT(*) as count
@@ -548,5 +554,5 @@ class PostgreSQLStorage(StorageInterface):
         """
         Closes the database connection pool.
         """
-        await self.pool.close()
+        await self._pool.close()
         logger.info("PostgreSQL connection pool closed")
