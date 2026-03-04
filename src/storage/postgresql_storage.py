@@ -405,14 +405,12 @@ class PostgreSQLStorage(StorageInterface):
 
         try:
             async with self.pool.acquire() as connection:
-                timestamp = datetime.now(UTC)
                 await connection.execute(
-                    "UPDATE channels SET paused = $1, paused_at = $2 WHERE name = $3",
+                    "UPDATE channels SET paused = $1 WHERE name = $2",
                     False,
-                    timestamp,
                     normalized_name,
                 )
-                logger.info("Channel %s resumed at %s", normalized_name, timestamp)
+                logger.info("Channel %s resumed successfully", normalized_name)
                 return True
 
         except asyncpg.PostgresError as e:
