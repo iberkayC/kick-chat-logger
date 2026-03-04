@@ -5,11 +5,9 @@ It also handles the messages from the websocket.
 
 import json
 import logging
-import time
 import asyncio
 from typing import Dict, Any, Optional
 import websockets
-from websockets import Close
 import aiofiles
 
 
@@ -44,60 +42,24 @@ async def listen_to_chat(
 
     chatroom_id = await get_chatroom_id(channel_name)
 
-    last_ping_time = time.time()
-    ping_interval = PING_INTERVAL_MINUTES * 60
-    ping_timeout = 60  # seconds to wait for pong response
-    consecutive_ping_failures = 0
-    max_ping_failures = 5
-
     if not chatroom_id:
         logger.error("Failed to get chatroom ID for %s", channel_name)
         return
     logger.info("Chatroom ID for %s: %s", channel_name, chatroom_id)
 
-    async with websockets.connect(WEBSOCKET_URL) as ws:
+    async with websockets.connect(
+        WEBSOCKET_URL,
+        ping_interval=PING_INTERVAL_MINUTES * 60,
+        ping_timeout=60,
+    ) as ws:
         logger.info("Connected to Kick WebSocket for channel %s", channel_name)
 
         await subscribe_to_chatroom(ws, chatroom_id)
 
         try:
             while stop_event is None or not stop_event.is_set():
-                # Use asyncio.wait_for with timeout to make recv() cancellable
                 try:
-                    current_time = time.time()
-                    if current_time - last_ping_time > ping_interval:
-                        try:
-                            # Send ping and wait for pong with timeout
-                            pong_waiter = await ws.ping()
-                            await asyncio.wait_for(pong_waiter, timeout=ping_timeout)
-                            last_ping_time = current_time
-                            consecutive_ping_failures = 0
-                            logger.debug("Ping/pong successful for %s", channel_name)
-                        except asyncio.TimeoutError:
-                            consecutive_ping_failures += 1
-                            logger.warning(
-                                "Ping timeout for %s (failure %d/%d)",
-                                channel_name,
-                                consecutive_ping_failures,
-                                max_ping_failures,
-                            )
-                            if consecutive_ping_failures >= max_ping_failures:
-                                logger.error(
-                                    "Max ping failures reached for %s, closing connection",
-                                    channel_name,
-                                )
-                                raise websockets.exceptions.ConnectionClosed(
-                                    sent=Close(1011, "Ping timeout"), rcvd=None
-                                )
-                            last_ping_time = (
-                                current_time  # Reset to avoid immediate retry
-                            )
-                        except websockets.exceptions.ConnectionClosed:
-                            logger.warning(
-                                "Connection lost during ping for %s", channel_name
-                            )
-                            raise
-
+                    # Use asyncio.wait_for with timeout to make recv() cancellable
                     message_raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
                     message = json.loads(message_raw)
                     kick_event = await handle_websocket_message(message)
