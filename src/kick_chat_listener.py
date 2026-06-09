@@ -26,6 +26,18 @@ from config import (
 logger = logging.getLogger(__name__)
 
 
+class ChannelNotFoundError(Exception):
+    """
+    Raised when a channel does not exist on Kick (404). Not retryable.
+    """
+
+
+class ChatroomIdError(Exception):
+    """
+    Raised when the chatroom ID for a channel could not be fetched. Retryable.
+    """
+
+
 async def listen_to_chat(
     channel_name: str,
     storage: SQLiteStorage,
@@ -38,13 +50,13 @@ async def listen_to_chat(
         channel_name (str): The name of the channel to listen to.
         storage (KickChatStorage): Storage instance for saving events.
         stop_event (Optional[asyncio.Event]): Event to signal when to stop listening.
+
+    Raises:
+        ChannelNotFoundError: If the channel does not exist on Kick (404).
+        ChatroomIdError: If the chatroom ID could not be fetched (retryable).
     """
 
     chatroom_id = await get_chatroom_id(channel_name)
-
-    if not chatroom_id:
-        logger.error("Failed to get chatroom ID for %s", channel_name)
-        return
     logger.info("Chatroom ID for %s: %s", channel_name, chatroom_id)
 
     async with websockets.connect(
@@ -100,7 +112,7 @@ async def subscribe_to_chatroom(
     logger.info("Subscribed to chatroom %s", chatroom_id)
 
 
-async def get_chatroom_id(channel_name: str) -> Optional[str]:
+async def get_chatroom_id(channel_name: str) -> str:
     """
     Fetches and returns the chatroom ID for a given channel name.
 
@@ -108,7 +120,11 @@ async def get_chatroom_id(channel_name: str) -> Optional[str]:
         channel_name (str): The name of the channel to get the chatroom ID for
 
     Returns:
-        Optional[str]: The chatroom ID for the given channel name
+        str: The chatroom ID for the given channel name
+
+    Raises:
+        ChannelNotFoundError: If the channel does not exist on Kick (404).
+        ChatroomIdError: If the lookup failed for any other reason (retryable).
     """
     channel_info_result = get_channel_info(channel_name)
     if not channel_info_result.success or not channel_info_result.data:
@@ -117,11 +133,19 @@ async def get_chatroom_id(channel_name: str) -> Optional[str]:
             channel_name,
             channel_info_result.error,
         )
-        return None
+        if channel_info_result.status_code == 404:
+            raise ChannelNotFoundError(f"Channel '{channel_name}' not found on Kick")
+        raise ChatroomIdError(
+            f"Failed to get channel info for '{channel_name}': {channel_info_result.error}"
+        )
 
+    chatroom_id = None
     if isinstance(channel_info_result.data, dict):
-        return channel_info_result.data.get("chatroom", {}).get("id")
-    return None
+        chatroom_id = channel_info_result.data.get("chatroom", {}).get("id")
+
+    if not chatroom_id:
+        raise ChatroomIdError(f"No chatroom ID in channel info for '{channel_name}'")
+    return chatroom_id
 
 
 async def parse_event(message: Dict[str, Any]) -> KickEvent:

@@ -486,7 +486,7 @@ class PostgreSQLStorage(StorageInterface):
 
         Returns:
             Dict[str, Any]: Dictionary containing channel statistics:
-                - event_counts: Event type counts
+                - message_counts: Event type counts
                 - total_messages: Total number of events/messages
                 - date_range: Tuple of (min_timestamp, max_timestamp)
                 - unique_users: Number of unique users
@@ -516,7 +516,7 @@ class PostgreSQLStorage(StorageInterface):
                     f"SELECT COUNT(*) FROM {table_name}"
                 )
 
-                date_range = await connection.fetch(
+                date_range = await connection.fetchrow(
                     f"SELECT MIN(created_at) as min_date, MAX(created_at) as max_date FROM {table_name}"
                 )
 
@@ -525,7 +525,7 @@ class PostgreSQLStorage(StorageInterface):
                 )
 
                 return {
-                    "event_counts": event_counts,
+                    "message_counts": event_counts,
                     "total_messages": total_messages,
                     "date_range": (
                         (

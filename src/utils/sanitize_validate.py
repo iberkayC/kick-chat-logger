@@ -61,10 +61,13 @@ def normalize_timestamp(timestamp) -> Optional[str]:
 
     try:
         if isinstance(timestamp, datetime):
-            # Handle datetime objects directly
-            return timestamp.isoformat() + "Z"
+            # Handle datetime objects directly, naive ones are assumed UTC
+            # isoformat() already includes +00:00, so no "Z" suffix is needed
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=UTC)
+            return timestamp.astimezone(UTC).isoformat()
         elif isinstance(timestamp, (int, float)):
-            return datetime.fromtimestamp(timestamp, UTC).isoformat() + "Z"
+            return datetime.fromtimestamp(timestamp, UTC).isoformat()
         elif isinstance(timestamp, str):
             # already a string, assume it's properly formatted
             return timestamp

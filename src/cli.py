@@ -17,7 +17,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import NestedCompleter
 
 from kick_api import get_channel_info
-from kick_chat_listener import listen_to_chat
+from kick_chat_listener import listen_to_chat, ChannelNotFoundError
 from storage.storage_factory import create_storage
 
 logging.basicConfig(
@@ -96,9 +96,14 @@ class KickChatLogger:
         while not stop_event.is_set() and self.running:
             try:
                 await listen_to_chat(channel_name, self.storage, stop_event)
-                # Reset counters on successful connection
-                retry_count = 0
-                connection_retry_count = 0
+                # listen_to_chat only returns normally when a stop was requested
+                break
+            except ChannelNotFoundError as e:
+                logger.error(
+                    "Channel %s no longer exists on Kick, stopping: %s",
+                    channel_name,
+                    e,
+                )
                 break
             except websockets.exceptions.ConnectionClosed as e:
                 connection_retry_count += 1
