@@ -111,13 +111,11 @@ The default storage type is SQLite which gets database locked errors on high tra
    ```
    STORAGE_TYPE = "sqlite"       # or "postgresql"
    ```
-3. For PostgreSQL, adjust the connection details just below:
+3. For PostgreSQL, copy `.env.example` to `.env` and fill in your connection details:
    ```
-   DEFAULT_PG_HOST = "localhost"
-   DEFAULT_PG_PORT = 5432
-   DEFAULT_PG_DB   = "kick_chat_logger"
-   DEFAULT_PG_USER = "kickscraper"
-   DEFAULT_PG_PASSWORD = "password"
+   KICK_PG_HOST=localhost
+   KICK_PG_PORT=5432
+   KICK_PG_DB=kick_chat_logger
+   KICK_PG_USER=kickscraper
+   KICK_PG_PASSWORD=changeme
    ```
-   
-Consider using environment variables instead of hardcoded credentials, I haven't bothered.

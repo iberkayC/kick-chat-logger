@@ -5,3 +5,4 @@ curl-cffi==0.10.0
 websockets==15.0.1
 asyncpg==0.29.0
 rich==14.3.3
+python-dotenv==1.2.2

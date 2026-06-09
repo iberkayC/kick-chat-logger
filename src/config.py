@@ -2,6 +2,13 @@
 Configuration settings for the Kick chat logger.
 """
 
+import os
+
+from dotenv import load_dotenv
+
+# loads variables from a .env file in the project root, if there is one
+load_dotenv()
+
 #### kick_chat_listener.py
 # WebSocket configuration
 WEBSOCKET_URL = (
@@ -68,11 +75,12 @@ DEFAULT_DB_PATH = "database/kick_scraper.db"
 CHANNEL_TABLE_PREFIX = "kickchat_"
 
 #### PostgreSQL Storage Configuration
-DEFAULT_PG_HOST = "localhost"
-DEFAULT_PG_PORT = 5432
-DEFAULT_PG_DB = "kick_chat_logger"
-DEFAULT_PG_USER = "kickscraper"
-DEFAULT_PG_PASSWORD = "Myv3rys3cur3p4sw0rd!313!"
+# read from the environment (or .env), see .env.example
+DEFAULT_PG_HOST = os.getenv("KICK_PG_HOST", "localhost")
+DEFAULT_PG_PORT = int(os.getenv("KICK_PG_PORT", "5432"))
+DEFAULT_PG_DB = os.getenv("KICK_PG_DB", "kick_chat_logger")
+DEFAULT_PG_USER = os.getenv("KICK_PG_USER", "kickscraper")
+DEFAULT_PG_PASSWORD = os.getenv("KICK_PG_PASSWORD", "")
 
 # Content message templates
 SUBSCRIPTION_CONTENT_TEMPLATE = "{username} subscribed for {months} months"
