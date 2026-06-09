@@ -19,7 +19,7 @@ The tool connects to Kick.com's WebSocket to log live chat events in real time. 
 - **WebSockets**: Uses the `websockets` library to listen to Kick's live chat stream.
 - **API Calls**: `curl-cffi` is used for HTTP requests, mostly because Kick uses Cloudflare for protection and this gets around it.
 - **Database**: Storage is pluggable. Use SQLite (`aiosqlite`) or PostgreSQL (`asyncpg`). Switch in `config.py`.
-- **CLI**: The command-line interface is built with `aioconsole`.
+- **CLI**: The command-line interface is built with `prompt_toolkit` and `rich`.
 
 ### Some Design Choices
 - Channel names get cleaned up before being used as table names, so unique names are guaranteed, this handling might not cover all edge cases, but is sufficient.
@@ -59,7 +59,6 @@ python cli.py
 - `add <channel_name>` - Add and start monitoring a channel
 - `pause <channel_name>` - Temporarily stop monitoring a channel
 - `resume <channel_name>` - Resume monitoring a paused channel
-- `remove <channel_name>` - Completely remove a channel from monitoring
 - `list` - Show all channels and their status
 - `stats <channel_name>` - Display statistics for a specific channel
 - `resume` - Resume all channels (needs improvement, temporary solution)
