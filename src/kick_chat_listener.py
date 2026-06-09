@@ -126,7 +126,7 @@ async def get_chatroom_id(channel_name: str) -> str:
         ChannelNotFoundError: If the channel does not exist on Kick (404).
         ChatroomIdError: If the lookup failed for any other reason (retryable).
     """
-    channel_info_result = get_channel_info(channel_name)
+    channel_info_result = await get_channel_info(channel_name)
     if not channel_info_result.success or not channel_info_result.data:
         logger.error(
             "Failed to get channel info for %s: %s",

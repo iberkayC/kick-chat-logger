@@ -4,7 +4,6 @@ from kick_event import KickEvent
 
 
 class StorageInterface(ABC):
-
     @abstractmethod
     async def initialize(self) -> bool:
         """

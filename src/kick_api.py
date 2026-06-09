@@ -6,11 +6,33 @@ import logging
 from typing import Dict, Optional, Union
 from dataclasses import dataclass
 import curl_cffi
+from curl_cffi.requests import AsyncSession
 from config import KICK_API_V2_URL
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30
+
+# one shared session so requests reuse connections and cookies
+# instead of doing a fresh tls handshake every time
+_session: Optional[AsyncSession] = None
+
+
+def _get_session() -> AsyncSession:
+    global _session
+    if _session is None:
+        _session = AsyncSession(impersonate="chrome", timeout=DEFAULT_TIMEOUT)
+    return _session
+
+
+async def close_session() -> None:
+    """
+    Close the shared HTTP session, if one was created.
+    """
+    global _session
+    if _session is not None:
+        await _session.close()
+        _session = None
 
 
 @dataclass(frozen=True)
@@ -142,7 +164,9 @@ def _handle_viewers_response(response, livestream_id: int) -> ApiResult:
         )
 
 
-def get_channel_info(channel_name: str, timeout: int = DEFAULT_TIMEOUT) -> ApiResult:
+async def get_channel_info(
+    channel_name: str, timeout: int = DEFAULT_TIMEOUT
+) -> ApiResult:
     """
     Get information about a channel from the Kick API.
 
@@ -158,7 +182,7 @@ def get_channel_info(channel_name: str, timeout: int = DEFAULT_TIMEOUT) -> ApiRe
     try:
         logger.info("Getting info for channel %s", channel_name)
 
-        response = curl_cffi.get(url, impersonate="chrome", timeout=timeout)
+        response = await _get_session().get(url, timeout=timeout)
 
         return _handle_channel_response(response, channel_name)
 
