@@ -11,8 +11,8 @@ logger = logging.getLogger(__name__)
 
 def sanitize_channel_name(name: str) -> str:
     """
-    Normalizes and sanitizes channel names for consistent storage and table naming.
-    Converts to lowercase and replaces invalid characters with underscores.
+    Normalizes channel names for consistent storage.
+    Converts to lowercase and strips whitespace.
 
     Args:
         name (str): The raw channel name
@@ -20,15 +20,10 @@ def sanitize_channel_name(name: str) -> str:
     Returns:
         str: The normalized channel name
     """
-    # Convert to lowercase for consistency (xQc = xqc)
-    normalized = name.lower().strip()
-
-    # Replace non-alphanumeric characters with underscores for safe table naming
-    # Note: This means 'xqc.' and 'xqc_' become the same, but Kick channel names
-    # typically don't contain special characters, so this is acceptable
-    sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", normalized)
-
-    return sanitized
+    # Convert to lowercase for consistency (xQc = xqc), but keep the name
+    # otherwise untouched: kick slugs can contain dashes, and mangling them
+    # here used to break the kick api lookup when channels were restarted
+    return name.lower().strip()
 
 
 def get_channel_table_name(channel_name: str) -> str:
@@ -41,7 +36,13 @@ def get_channel_table_name(channel_name: str) -> str:
     Returns:
         str: The table name for the channel, prefixed with the CHANNEL_TABLE_PREFIX constant
     """
-    sanitized = sanitize_channel_name(channel_name)
+    normalized = sanitize_channel_name(channel_name)
+
+    # Replace non-alphanumeric characters with underscores for safe table naming
+    # Note: This means 'a-b' and 'a_b' share a table, but collisions like that
+    # are rare enough that this is acceptable
+    sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", normalized)
+
     return f"{CHANNEL_TABLE_PREFIX}{sanitized}"
 
 
