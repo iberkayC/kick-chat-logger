@@ -6,8 +6,6 @@ Kick Chat Scraper - Long-running server application with interactive CLI
 import asyncio
 import logging
 import sys
-from typing import Dict
-import websockets
 
 from rich.console import Console
 from rich.table import Table
@@ -18,8 +16,13 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import NestedCompleter
 
 from kick_api import get_channel_info, close_session
-from kick_chat_listener import listen_to_chat, ChannelNotFoundError
+from kick_chat_listener import (
+    ChatConnectionManager,
+    ChannelNotFoundError,
+    ChatroomIdError,
+)
 from storage.storage_factory import create_storage
+from config import CHANNEL_LOOKUP_CONCURRENCY
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,8 +43,7 @@ class KickChatLogger:
 
     def __init__(self):
         self.storage = create_storage()
-        self.active_tasks: Dict[str, asyncio.Task] = {}
-        self.stop_events: Dict[str, asyncio.Event] = {}
+        self.manager = ChatConnectionManager(self.storage)
         self.running = True
 
     async def initialize(self) -> bool:
@@ -54,174 +56,6 @@ class KickChatLogger:
         if not await self.storage.initialize():
             logger.error("Failed to initialize storage")
             return False
-        return True
-
-    async def start_channel_scraping(self, channel_name: str) -> bool:
-        """
-        Start scraping a specific channel.
-
-        Returns:
-            bool: True if scraping was started successfully, False otherwise
-        """
-        if channel_name in self.active_tasks:
-            logger.warning("Channel %s is already being scraped", channel_name)
-            return True
-
-        stop_event = asyncio.Event()
-        self.stop_events[channel_name] = stop_event
-
-        task = asyncio.create_task(
-            self._scrape_channel_with_retry(channel_name, stop_event)
-        )
-        self.active_tasks[channel_name] = task
-
-        logger.info("Started scraping channel: %s", channel_name)
-        return True
-
-    async def _scrape_channel_with_retry(
-        self, channel_name: str, stop_event: asyncio.Event
-    ) -> None:
-        """
-        Scrape a channel with automatic retry on failures.
-
-        Returns:
-            None
-        """
-        retry_count = 0
-        connection_retry_count = 0
-        max_retries = 10
-        max_connection_retries = 50
-        base_delay = 2
-        connection_base_delay = 1
-
-        while not stop_event.is_set() and self.running:
-            try:
-                await listen_to_chat(channel_name, self.storage, stop_event)
-                # listen_to_chat only returns normally when a stop was requested
-                break
-            except ChannelNotFoundError as e:
-                logger.error(
-                    "Channel %s no longer exists on Kick, stopping: %s",
-                    channel_name,
-                    e,
-                )
-                break
-            except websockets.exceptions.ConnectionClosed as e:
-                connection_retry_count += 1
-
-                # Check if this is a common error that needs longer backoff
-                error_code = getattr(e, "code", None)
-                if error_code in [4200, 1011]:  # Server restart or ping timeout
-                    if connection_retry_count > max_connection_retries:
-                        logger.error(
-                            "Max connection retries exceeded for channel %s (error %s), stopping",
-                            channel_name,
-                            error_code,
-                        )
-                        break
-
-                    # Start at 1s, cap at 30s, with 30s max delay for persistent connection issues
-                    if connection_retry_count <= 10:
-                        delay = min(
-                            connection_base_delay
-                            * (1.5 ** min(connection_retry_count, 8)),
-                            30,
-                        )
-                    else:
-                        delay = 30  # Max delay for persistent connection issues
-                    logger.warning(
-                        "WebSocket connection closed for %s (error %s, attempt %d/%d). Retrying in %.1f seconds...",
-                        channel_name,
-                        error_code,
-                        connection_retry_count,
-                        max_connection_retries,
-                        delay,
-                    )
-                else:
-                    # Unknown connection error, treat as regular retry
-                    retry_count += 1
-                    if retry_count > max_retries:
-                        logger.error(
-                            "Max retries exceeded for channel %s, stopping",
-                            channel_name,
-                        )
-                        break
-                    delay = base_delay * (2 ** (retry_count - 1))
-                    logger.warning(
-                        "Connection error for %s (attempt %d/%d): %s. Retrying in %d seconds...",
-                        channel_name,
-                        retry_count,
-                        max_retries,
-                        e,
-                        delay,
-                    )
-
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=delay)
-                    break
-                except asyncio.TimeoutError:
-                    pass
-
-            except Exception as e:
-                retry_count += 1
-                if retry_count > max_retries:
-                    logger.error(
-                        "Max retries exceeded for channel %s, stopping", channel_name
-                    )
-                    break
-
-                delay = min(base_delay * (2 ** (retry_count - 1)), 30)
-                logger.warning(
-                    "Error in channel %s (attempt %d/%d): %s. Retrying in %d seconds...",
-                    channel_name,
-                    retry_count,
-                    max_retries,
-                    e,
-                    delay,
-                )
-
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=delay)
-                    break
-                except asyncio.TimeoutError:
-                    pass
-
-        if channel_name in self.active_tasks:
-            del self.active_tasks[channel_name]
-        if channel_name in self.stop_events:
-            del self.stop_events[channel_name]
-
-        logger.info("Stopped scraping channel: %s", channel_name)
-
-    async def stop_channel_scraping(self, channel_name: str) -> bool:
-        """
-        Stop scraping a specific channel.
-
-        Returns:
-            bool: True if scraping was stopped successfully, False otherwise
-        """
-        if channel_name not in self.active_tasks:
-            logger.warning("Channel %s is not being scraped", channel_name)
-            return False
-
-        if channel_name in self.stop_events:
-            self.stop_events[channel_name].set()
-
-        task = self.active_tasks.get(channel_name)
-        if task:
-            try:
-                await asyncio.wait_for(task, timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Timeout waiting for channel %s to stop, cancelling task",
-                    channel_name,
-                )
-                task.cancel()
-                try:
-                    await asyncio.wait_for(task, timeout=2.0)
-                except asyncio.TimeoutError:
-                    logger.error("Failed to cancel task for channel %s", channel_name)
-
         return True
 
     async def load_and_start_active_channels(self) -> None:
@@ -244,8 +78,18 @@ class KickChatLogger:
             ", ".join(active_channels),
         )
 
-        for channel_name in active_channels:
-            await self.start_channel_scraping(channel_name)
+        # chatroom-id lookups run concurrently but capped, so a big channel
+        # list doesn't burst-hammer the kick api on startup
+        semaphore = asyncio.Semaphore(CHANNEL_LOOKUP_CONCURRENCY)
+
+        async def start_one(channel_name: str) -> None:
+            async with semaphore:
+                try:
+                    await self.manager.subscribe(channel_name)
+                except (ChannelNotFoundError, ChatroomIdError) as e:
+                    logger.error("Failed to start scraping %s: %s", channel_name, e)
+
+        await asyncio.gather(*(start_one(name) for name in active_channels))
 
     async def add_channel(self, channel_name: str) -> bool:
         """
@@ -275,16 +119,18 @@ class KickChatLogger:
             console.print(f"[red]failed to add '{channel_name}' to database[/red]")
             return False
 
-        if await self.start_channel_scraping(channel_name):
-            logger.info(
-                "Successfully added and started scraping channel '%s'", channel_name
-            )
-            console.print(f"[green]'{channel_name}' added[/green]")
-            return True
-        else:
-            logger.error("Failed to start scraping channel '%s'", channel_name)
+        try:
+            await self.manager.subscribe(channel_name)
+        except (ChannelNotFoundError, ChatroomIdError) as e:
+            logger.error("Failed to start scraping channel '%s': %s", channel_name, e)
             console.print(f"[red]failed to start scraping '{channel_name}'[/red]")
             return False
+
+        logger.info(
+            "Successfully added and started scraping channel '%s'", channel_name
+        )
+        console.print(f"[green]'{channel_name}' added[/green]")
+        return True
 
     async def pause_channel(self, channel_name: str) -> bool:
         """
@@ -293,7 +139,7 @@ class KickChatLogger:
         Returns:
             bool: True if channel was paused successfully, False otherwise
         """
-        await self.stop_channel_scraping(channel_name)
+        await self.manager.unsubscribe(channel_name)
 
         if await self.storage.pause_channel(channel_name):
             logger.info("Channel '%s' paused successfully", channel_name)
@@ -316,37 +162,20 @@ class KickChatLogger:
             console.print(f"[red]failed to resume '{channel_name}'[/red]")
             return False
 
-        if await self.start_channel_scraping(channel_name):
-            logger.info("Channel '%s' resumed successfully", channel_name)
-            console.print(f"[green]'{channel_name}' resumed[/green]")
-            return True
-        else:
+        try:
+            await self.manager.subscribe(channel_name)
+        except (ChannelNotFoundError, ChatroomIdError) as e:
             logger.error(
-                "Failed to start scraping for resumed channel '%s'", channel_name
+                "Failed to start scraping for resumed channel '%s': %s",
+                channel_name,
+                e,
             )
             console.print(f"[red]failed to start scraping '{channel_name}'[/red]")
             return False
 
-    async def resume_all_channels(self) -> bool:
-        """
-        Resume all channels.
-
-        Returns:
-            bool: True if resumed successfully, False otherwise
-        """
-        channels = await self.storage.get_all_channels()
-
-        if not channels:
-            logger.info("No channels to resume")
-            return True
-        try:
-            for channel_name in channels:
-                await self.resume_channel(channel_name)
-
-            return True
-        except Exception as e:
-            logger.error("Failed to resume all channels: %s", e)
-            return False
+        logger.info("Channel '%s' resumed successfully", channel_name)
+        console.print(f"[green]'{channel_name}' resumed[/green]")
+        return True
 
     async def list_channels(self) -> None:
         """
@@ -370,16 +199,20 @@ class KickChatLogger:
         table.add_column("added", style="dim")
         table.add_column("paused at", style="dim")
 
+        state_display = {
+            "subscribed": "[green]running[/green]",
+            "pending": "[yellow]pending[/yellow]",
+            "errored": "[red]error[/red]",
+        }
+
         for channel in channels:
             status = (
                 "[green]active[/green]"
                 if not channel["paused"]
                 else "[yellow]paused[/yellow]"
             )
-            scraping = (
-                "[green]running[/green]"
-                if channel["name"] in self.active_tasks
-                else "[dim]stopped[/dim]"
+            scraping = state_display.get(
+                self.manager.channel_state(channel["name"]), "[dim]stopped[/dim]"
             )
             paused_at = str(channel["paused_at"]) if channel["paused_at"] else ""
             table.add_row(
@@ -441,9 +274,7 @@ class KickChatLogger:
         logger.info("Shutting down scraper...")
         self.running = False
 
-        for channel_name in list(self.active_tasks.keys()):
-            await self.stop_channel_scraping(channel_name)
-
+        await self.manager.close()
         await close_session()
 
         logger.info("All scraping tasks stopped")
@@ -482,7 +313,7 @@ class KickChatLogger:
 
         while self.running:
             try:
-                active_count = len(self.active_tasks)
+                active_count = self.manager.active_count()
                 prompt = f"kick-scraper ({active_count} active)> "
                 completer = await self._build_completer()
 

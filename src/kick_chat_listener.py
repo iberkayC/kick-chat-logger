@@ -1,18 +1,23 @@
 """
 This module handles the websocket connection to the Kick chat.
+All channels share a single Pusher connection owned by
+ChatConnectionManager, with a queue per channel so one slow
+channel can't stall the others.
 It also handles the messages from the websocket.
 """
 
 import json
 import logging
 import asyncio
+import contextlib
+from dataclasses import dataclass, field
 from typing import Dict, Any, Optional
 import websockets
 import aiofiles
 
 
 from kick_api import get_channel_info
-from storage.sqlite_storage import SQLiteStorage
+from storage.storage_interface import StorageInterface
 from kick_event import KickEvent
 from config import (
     WEBSOCKET_URL,
@@ -20,10 +25,28 @@ from config import (
     IGNORED_EVENTS,
     UNHANDLED_MESSAGES_FILE,
     PING_INTERVAL_MINUTES,
+    PUSHER_INTERNAL_SUBSCRIPTION_SUCCEEDED_EVENT,
 )
 
 
 logger = logging.getLogger(__name__)
+
+# subscription states for a channel on the shared connection
+PENDING = "pending"  # registered, no ack from pusher yet
+SUBSCRIBED = "subscribed"  # pusher acked the subscription
+ERRORED = "errored"  # gave up on this channel, resume retries it
+
+SUBSCRIBE_ACK_TIMEOUT = 5
+SUBSCRIBE_ACK_RETRIES = 2
+QUEUE_MAXSIZE = 1000
+DRAIN_TIMEOUT = 5
+
+# reconnect backoff
+CONNECTION_BASE_DELAY = 1  # server restart / ping timeout (4200, 1011)
+MAX_CONNECTION_RETRIES = 50
+BASE_DELAY = 2  # everything else
+MAX_RETRIES = 10
+MAX_BACKOFF_DELAY = 30
 
 
 class ChannelNotFoundError(Exception):
@@ -38,78 +61,419 @@ class ChatroomIdError(Exception):
     """
 
 
-async def listen_to_chat(
-    channel_name: str,
-    storage: SQLiteStorage,
-    stop_event: Optional[asyncio.Event] = None,
-) -> None:
+@dataclass
+class ChannelSub:
     """
-    Connects to Kick's WebSocket and listens for chat messages.
-
-    Args:
-        channel_name (str): The name of the channel to listen to.
-        storage (KickChatStorage): Storage instance for saving events.
-        stop_event (Optional[asyncio.Event]): Event to signal when to stop listening.
-
-    Raises:
-        ChannelNotFoundError: If the channel does not exist on Kick (404).
-        ChatroomIdError: If the chatroom ID could not be fetched (retryable).
+    Bookkeeping for one channel subscription on the shared connection.
     """
 
-    chatroom_id = await get_chatroom_id(channel_name)
-    logger.info("Chatroom ID for %s: %s", channel_name, chatroom_id)
+    channel_name: str
+    chatroom_id: str
+    pusher_channel: str
+    queue: asyncio.Queue
+    state: str = PENDING
+    ack: asyncio.Event = field(default_factory=asyncio.Event)
+    consumer_task: Optional[asyncio.Task] = None
+    ack_task: Optional[asyncio.Task] = None
 
-    async with websockets.connect(
-        WEBSOCKET_URL,
-        ping_interval=PING_INTERVAL_MINUTES * 60,
-        ping_timeout=60,
-    ) as ws:
-        logger.info("Connected to Kick WebSocket for channel %s", channel_name)
 
-        await subscribe_to_chatroom(ws, chatroom_id)
+class ChatConnectionManager:
+    """
+    Owns the single shared Pusher websocket and all channel subscriptions.
 
+    Each subscribed channel gets a pusher:subscribe frame on the shared
+    socket, a queue for its incoming messages, and a consumer task that
+    stores them. One runner task holds the connection and reconnects with
+    backoff for everyone at once.
+    """
+
+    def __init__(self, storage: StorageInterface):
+        self.storage = storage
+        self._channels: Dict[str, ChannelSub] = {}  # kick name -> sub
+        self._routes: Dict[str, str] = {}  # pusher channel -> kick name
+        self._ws = None
+        self._connected = False
+        self._closing = False
+        self._runner: Optional[asyncio.Task] = None
+
+    async def subscribe(self, channel_name: str) -> bool:
+        """
+        Subscribe a channel on the shared connection and start logging it.
+
+        Args:
+            channel_name (str): The name of the channel to subscribe
+
+        Returns:
+            bool: True if the channel is subscribed (or already was)
+
+        Raises:
+            ChannelNotFoundError: If the channel does not exist on Kick (404).
+            ChatroomIdError: If the chatroom ID could not be fetched (retryable).
+        """
+        sub = self._channels.get(channel_name)
+        if sub is not None:
+            if sub.state == ERRORED:
+                # tear the failed sub down and redo it from scratch
+                await self.unsubscribe(channel_name)
+            else:
+                logger.warning("Channel %s is already subscribed", channel_name)
+                return True
+
+        chatroom_id = await get_chatroom_id(channel_name)
+        logger.info("Chatroom ID for %s: %s", channel_name, chatroom_id)
+
+        sub = ChannelSub(
+            channel_name=channel_name,
+            chatroom_id=chatroom_id,
+            pusher_channel=f"chatrooms.{chatroom_id}.v2",
+            queue=asyncio.Queue(maxsize=QUEUE_MAXSIZE),
+        )
+        self._channels[channel_name] = sub
+        self._routes[sub.pusher_channel] = channel_name
+        sub.consumer_task = asyncio.create_task(self._consume(sub))
+
+        self._ensure_runner()
+        if self._connected:
+            sub.ack_task = asyncio.create_task(self._subscribe_with_ack(sub))
+        # not connected: the (re)connect path picks the sub up in
+        # _resubscribe_all, it stays pending until then
+
+        return True
+
+    async def unsubscribe(self, channel_name: str) -> bool:
+        """
+        Unsubscribe a channel, draining its queue before stopping the consumer.
+
+        Args:
+            channel_name (str): The name of the channel to unsubscribe
+
+        Returns:
+            bool: True if the channel was subscribed, False otherwise
+        """
+        sub = self._channels.pop(channel_name, None)
+        if sub is None:
+            logger.warning("Channel %s is not subscribed", channel_name)
+            return False
+
+        # drop the route first so the reader stops enqueueing for this channel
+        self._routes.pop(sub.pusher_channel, None)
+
+        if sub.ack_task is not None:
+            sub.ack_task.cancel()
+
+        # best effort, the socket may be down which is fine too
+        ws = self._ws
+        if ws is not None:
+            frame = {
+                "event": "pusher:unsubscribe",
+                "data": {"channel": sub.pusher_channel},
+            }
+            with contextlib.suppress(websockets.exceptions.ConnectionClosed):
+                await ws.send(json.dumps(frame))
+
+        await self._stop_consumer(sub)
+        logger.info("Unsubscribed from channel %s", channel_name)
+        return True
+
+    def channel_state(self, channel_name: str) -> Optional[str]:
+        """
+        Get the subscription state of a channel.
+
+        Args:
+            channel_name (str): The name of the channel
+
+        Returns:
+            Optional[str]: PENDING, SUBSCRIBED or ERRORED, None if not subscribed
+        """
+        sub = self._channels.get(channel_name)
+        return sub.state if sub is not None else None
+
+    def active_count(self) -> int:
+        """
+        Returns:
+            int: Number of channels registered on the connection
+        """
+        return len(self._channels)
+
+    async def close(self) -> None:
+        """
+        Shut down the connection and all consumers, draining queues first.
+
+        Returns:
+            None
+        """
+        self._closing = True
+        if self._runner is not None:
+            self._runner.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._runner
+            self._runner = None
+        for sub in list(self._channels.values()):
+            if sub.ack_task is not None:
+                sub.ack_task.cancel()
+            await self._stop_consumer(sub)
+        self._channels.clear()
+        self._routes.clear()
+
+    def _ensure_runner(self) -> None:
+        # (re)start the connection loop if it isn't running, either the
+        # first subscribe or a revive after the backoff gave up
+        if self._runner is None or self._runner.done():
+            self._closing = False
+            self._runner = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        """
+        Connection loop: connect, resubscribe everything, read frames until
+        the connection drops, back off, repeat.
+
+        Returns:
+            None
+        """
+        connection_retries = 0
+        other_retries = 0
+
+        while not self._closing:
+            error: Optional[BaseException] = None
+            try:
+                async with websockets.connect(
+                    WEBSOCKET_URL,
+                    ping_interval=PING_INTERVAL_MINUTES * 60,
+                    ping_timeout=60,
+                ) as ws:
+                    self._ws = ws
+                    self._connected = True
+                    # backoff starts from scratch after a good connection
+                    connection_retries = 0
+                    other_retries = 0
+                    logger.info(
+                        "Connected to Kick WebSocket (%d channels)",
+                        len(self._channels),
+                    )
+                    self._resubscribe_all()
+                    async for raw in ws:
+                        await self._handle_frame(raw)
+                # a clean server close ends the iterator without raising,
+                # reconnect in that case too
+            except websockets.exceptions.ConnectionClosed as e:
+                error = e
+            except Exception as e:
+                error = e
+            finally:
+                self._ws = None
+                self._connected = False
+
+            if self._closing:
+                break
+
+            error_code = getattr(error, "code", None)
+            if error_code in (4200, 1011):  # server restart or ping timeout
+                connection_retries += 1
+                if connection_retries > MAX_CONNECTION_RETRIES:
+                    logger.error(
+                        "Max connection retries exceeded (error %s), giving up",
+                        error_code,
+                    )
+                    break
+                delay = min(
+                    CONNECTION_BASE_DELAY * (1.5 ** min(connection_retries, 8)),
+                    MAX_BACKOFF_DELAY,
+                )
+                attempt, max_attempts = connection_retries, MAX_CONNECTION_RETRIES
+            else:
+                other_retries += 1
+                if other_retries > MAX_RETRIES:
+                    logger.error("Max retries exceeded, giving up: %s", error)
+                    break
+                delay = min(BASE_DELAY * (2 ** (other_retries - 1)), MAX_BACKOFF_DELAY)
+                attempt, max_attempts = other_retries, MAX_RETRIES
+
+            logger.warning(
+                "WebSocket connection lost (%s, attempt %d/%d). Reconnecting in %.1f seconds...",
+                error if error is not None else "closed cleanly",
+                attempt,
+                max_attempts,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+        if not self._closing:
+            # gave up. leave the subs registered so `list` shows the damage,
+            # any subscribe/resume restarts the runner via _ensure_runner
+            for sub in self._channels.values():
+                sub.state = ERRORED
+
+    def _resubscribe_all(self) -> None:
+        # fire-and-forget on purpose: acks arrive on this same socket, so the
+        # runner has to get back to reading frames before any ack can land,
+        # awaiting them here would deadlock. uses the cached chatroom ids, so
+        # a reconnect costs zero http requests
+        for sub in self._channels.values():
+            sub.state = PENDING
+            sub.ack.clear()
+            if sub.ack_task is not None:
+                sub.ack_task.cancel()
+            sub.ack_task = asyncio.create_task(self._subscribe_with_ack(sub))
+
+    async def _subscribe_with_ack(self, sub: ChannelSub) -> None:
+        """
+        Send the subscribe frame and wait for pusher's ack, re-fetching the
+        chatroom ID on timeout in case it changed. Only sends frames, never
+        touches the connection itself: reconnects are the runner's job.
+
+        Args:
+            sub (ChannelSub): The channel subscription to subscribe
+
+        Returns:
+            None
+        """
+        for _ in range(1 + SUBSCRIBE_ACK_RETRIES):
+            ws = self._ws
+            if ws is None:
+                # connection dropped, the reconnect path respawns this task
+                return
+            sub.ack.clear()
+            frame = {
+                "event": "pusher:subscribe",
+                "data": {"auth": "", "channel": sub.pusher_channel},
+            }
+            try:
+                await ws.send(json.dumps(frame))
+            except websockets.exceptions.ConnectionClosed:
+                return
+
+            try:
+                await asyncio.wait_for(sub.ack.wait(), SUBSCRIBE_ACK_TIMEOUT)
+                return  # _handle_frame marked it subscribed
+            except asyncio.TimeoutError:
+                pass
+
+            # no ack, the chatroom id may be stale (channel recreated),
+            # look it up again before the next attempt
+            try:
+                chatroom_id = await get_chatroom_id(sub.channel_name)
+            except ChannelNotFoundError as e:
+                logger.error(
+                    "Channel %s no longer exists on Kick, stopping: %s",
+                    sub.channel_name,
+                    e,
+                )
+                sub.state = ERRORED
+                return
+            except ChatroomIdError as e:
+                logger.warning(
+                    "Could not refresh chatroom ID for %s: %s", sub.channel_name, e
+                )
+                continue
+
+            if chatroom_id != sub.chatroom_id:
+                logger.info(
+                    "Chatroom ID for %s changed %s -> %s",
+                    sub.channel_name,
+                    sub.chatroom_id,
+                    chatroom_id,
+                )
+                self._routes.pop(sub.pusher_channel, None)
+                sub.chatroom_id = chatroom_id
+                sub.pusher_channel = f"chatrooms.{chatroom_id}.v2"
+                self._routes[sub.pusher_channel] = sub.channel_name
+
+        logger.error(
+            "No subscription ack for %s after %d attempts, marking errored",
+            sub.channel_name,
+            1 + SUBSCRIBE_ACK_RETRIES,
+        )
+        sub.state = ERRORED
+
+    async def _handle_frame(self, raw: str) -> None:
+        """
+        Parse one frame from the shared socket and route it to the right
+        channel's queue. Connection-level frames and post-unsubscribe
+        stragglers keep the old unhandled-message logging behavior.
+
+        Args:
+            raw (str): The raw frame from the websocket
+
+        Returns:
+            None
+        """
         try:
-            while stop_event is None or not stop_event.is_set():
-                try:
-                    # Use asyncio.wait_for with timeout to make recv() cancellable
-                    message_raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
-                    message = json.loads(message_raw)
-                    kick_event = await handle_websocket_message(message)
+            message = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("Dropping non-JSON frame: %.200s", raw)
+            return
+        if not isinstance(message, dict):
+            logger.warning("Dropping non-object frame: %.200s", raw)
+            return
 
-                    if kick_event:
-                        success = await storage.store_event(channel_name, kick_event)
-                        if not success:
-                            logger.error("Failed to store event for %s", channel_name)
+        channel_name = self._routes.get(message.get("channel"))
 
-                except asyncio.TimeoutError:
-                    # Didn't receive a message in 1 second, so we continue
-                    # looking for a message.
-                    continue
+        # acks are connection bookkeeping, not chat. intercept them here,
+        # handle_websocket_message would just ignore them (IGNORED_EVENTS)
+        if message.get("event") == PUSHER_INTERNAL_SUBSCRIPTION_SUCCEEDED_EVENT:
+            sub = self._channels.get(channel_name) if channel_name else None
+            if sub is not None:
+                sub.state = SUBSCRIBED
+                sub.ack.set()
+                logger.info(
+                    "Subscribed to chatroom %s (%s)", sub.chatroom_id, channel_name
+                )
+            return
 
-        except websockets.exceptions.ConnectionClosed as e:
-            logger.warning("WebSocket connection closed for %s: %s", channel_name, e)
-            raise e
-        finally:
-            logger.info("Disconnected from Kick WebSocket for %s", channel_name)
+        if channel_name is None:
+            await handle_websocket_message(message)
+            return
 
+        sub = self._channels.get(channel_name)
+        if sub is None:
+            return
+        try:
+            sub.queue.put_nowait(message)
+        except asyncio.QueueFull:
+            # an awaited put would let one slow channel stall every other
+            # channel on the shared socket, so drop instead
+            logger.warning("Queue full for %s, dropping message", channel_name)
 
-async def subscribe_to_chatroom(
-    ws,
-    chatroom_id: str,
-) -> None:
-    """
-    Sends a subscription message to the Kick chatroom.
+    async def _consume(self, sub: ChannelSub) -> None:
+        """
+        Drain one channel's queue: parse each message and store it.
 
-    Args:
-        ws: The WebSocket connection
-        chatroom_id (str): The ID of the chatroom to subscribe to
-    """
-    subscribe_message = {
-        "event": "pusher:subscribe",
-        "data": {"auth": "", "channel": f"chatrooms.{chatroom_id}.v2"},
-    }
-    await ws.send(json.dumps(subscribe_message))
-    logger.info("Subscribed to chatroom %s", chatroom_id)
+        Args:
+            sub (ChannelSub): The channel subscription to consume
+
+        Returns:
+            None
+        """
+        while True:
+            message = await sub.queue.get()
+            try:
+                kick_event = await handle_websocket_message(message)
+                if kick_event:
+                    success = await self.storage.store_event(
+                        sub.channel_name, kick_event
+                    )
+                    if not success:
+                        logger.error("Failed to store event for %s", sub.channel_name)
+            except Exception as e:
+                # one bad message must not kill the consumer or wedge drains
+                logger.error("Error handling message for %s: %s", sub.channel_name, e)
+            finally:
+                sub.queue.task_done()
+
+    async def _stop_consumer(self, sub: ChannelSub) -> None:
+        # let the consumer work through whatever is queued, then cancel it
+        try:
+            await asyncio.wait_for(sub.queue.join(), DRAIN_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timeout draining queue for %s, dropping %d messages",
+                sub.channel_name,
+                sub.queue.qsize(),
+            )
+        if sub.consumer_task is not None:
+            sub.consumer_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sub.consumer_task
 
 
 async def get_chatroom_id(channel_name: str) -> str:

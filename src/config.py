@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # loads variables from a .env file in the project root, if there is one
 load_dotenv()
 
-#### kick_chat_listener.py
+# kick_chat_listener.py
 # WebSocket configuration
 WEBSOCKET_URL = (
     "wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?"
@@ -63,18 +63,21 @@ UNHANDLED_MESSAGES_FILE = "unhandled_messages.txt"
 
 PING_INTERVAL_MINUTES = 10
 
-#### kick_api.py
+# kick_api.py
 KICK_API_V2_URL = "https://kick.com/api/v2/channels/"
 
-#### Storage Configuration
+# caps concurrent chatroom-id lookups when resuming channels at startup
+CHANNEL_LOOKUP_CONCURRENCY = 10
+
+# Storage Configuration
 # Supported storage types: "sqlite", "postgresql"
 STORAGE_TYPE = "sqlite"
 
-#### SQLite Storage Configuration
+# SQLite Storage Configuration
 DEFAULT_DB_PATH = "database/kick_scraper.db"
 CHANNEL_TABLE_PREFIX = "kickchat_"
 
-#### PostgreSQL Storage Configuration
+# PostgreSQL Storage Configuration
 # read from the environment (or .env), see .env.example
 DEFAULT_PG_HOST = os.getenv("KICK_PG_HOST", "localhost")
 DEFAULT_PG_PORT = int(os.getenv("KICK_PG_PORT", "5432"))
