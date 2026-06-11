@@ -22,7 +22,6 @@ from kick_chat_listener import (
     ChatroomIdError,
 )
 from storage.storage_factory import create_storage
-from config import CHANNEL_LOOKUP_CONCURRENCY
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,16 +77,11 @@ class KickChatLogger:
             ", ".join(active_channels),
         )
 
-        # chatroom-id lookups run concurrently but capped, so a big channel
-        # list doesn't burst-hammer the kick api on startup
-        semaphore = asyncio.Semaphore(CHANNEL_LOOKUP_CONCURRENCY)
-
         async def start_one(channel_name: str) -> None:
-            async with semaphore:
-                try:
-                    await self.manager.subscribe(channel_name)
-                except (ChannelNotFoundError, ChatroomIdError) as e:
-                    logger.error("Failed to start scraping %s: %s", channel_name, e)
+            try:
+                await self.manager.subscribe(channel_name)
+            except (ChannelNotFoundError, ChatroomIdError) as e:
+                logger.error("Failed to start scraping %s: %s", channel_name, e)
 
         await asyncio.gather(*(start_one(name) for name in active_channels))
 
@@ -163,7 +157,8 @@ class KickChatLogger:
             return False
 
         try:
-            await self.manager.subscribe(channel_name)
+            # fresh lookup, resume is the manual fix for a stale chatroom id
+            await self.manager.subscribe(channel_name, refresh=True)
         except (ChannelNotFoundError, ChatroomIdError) as e:
             logger.error(
                 "Failed to start scraping for resumed channel '%s': %s",

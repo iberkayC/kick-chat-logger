@@ -119,12 +119,17 @@ class PostgreSQLStorage(StorageInterface):
             name TEXT UNIQUE NOT NULL,
             added_at TIMESTAMPTZ NOT NULL,
             paused BOOLEAN DEFAULT FALSE,
-            paused_at TIMESTAMPTZ
+            paused_at TIMESTAMPTZ,
+            chatroom_id BIGINT
         );
         """
 
         try:
             await connection.execute(create_table_sql)
+            # databases from before the chatroom_id column get it added here
+            await connection.execute(
+                "ALTER TABLE channels ADD COLUMN IF NOT EXISTS chatroom_id BIGINT"
+            )
             logger.info("Channels table created successfully")
             return True
 
@@ -421,6 +426,59 @@ class PostgreSQLStorage(StorageInterface):
 
         except asyncpg.PostgresError as e:
             logger.error(f"Failed to resume channel {normalized_name}: {e}")
+            return False
+
+    async def get_chatroom_id(self, channel_name: str) -> Optional[int]:
+        """
+        Returns the stored chatroom ID for a channel, if known.
+
+        Args:
+            channel_name (str): The name of the channel
+
+        Returns:
+            Optional[int]: The chatroom ID, or None if not stored
+        """
+        normalized_name = sanitize_channel_name(channel_name)
+
+        try:
+            async with self._pool.acquire() as connection:
+                return await connection.fetchval(
+                    "SELECT chatroom_id FROM channels WHERE name = $1",
+                    normalized_name,
+                )
+
+        except asyncpg.PostgresError as e:
+            logger.error(f"Failed to get chatroom ID for {normalized_name}: {e}")
+            return None
+
+    async def set_chatroom_id(self, channel_name: str, chatroom_id: int) -> bool:
+        """
+        Stores the chatroom ID for a channel.
+
+        Args:
+            channel_name (str): The name of the channel
+            chatroom_id (int): The chatroom ID to store
+
+        Returns:
+            bool: True if stored successfully, False otherwise
+        """
+        normalized_name = sanitize_channel_name(channel_name)
+
+        try:
+            async with self._pool.acquire() as connection:
+                await connection.execute(
+                    "UPDATE channels SET chatroom_id = $1 WHERE name = $2",
+                    chatroom_id,
+                    normalized_name,
+                )
+
+            logger.debug(
+                "Stored chatroom ID %s for channel %s", chatroom_id, normalized_name
+            )
+            return True
+
+        except asyncpg.PostgresError as e:
+            logger.error(f"Failed to set chatroom ID for {normalized_name}: {e}")
             return False
 
     async def get_active_channels(self) -> List[str]:

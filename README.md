@@ -26,6 +26,7 @@ The tool connects to Kick.com's WebSocket to log live chat events in real time. 
 - Channel names get cleaned up before being used as table names, so unique names are guaranteed, this handling might not cover all edge cases, but is sufficient.
 - If the connection drops, it'll keep retrying forever with capped exponential backoff and jitter instead of spamming the server. Channel-level failures (banned or renamed channels) are marked as errored instead and can be retried with `resume <channel>`.
 - The WebSocket connection self-pings (see `PING_INTERVAL_SECONDS` in `config.py`) to stay alive and notice dead connections quickly, and answers Pusher's application-level pings.
+- Chatroom IDs are cached in the database, so restarts don't hit the Kick API for channels it has already seen. Fresh lookups are capped by `CHANNEL_LOOKUP_CONCURRENCY` in `config.py`, and `resume <channel>` always looks the ID up fresh in case the cached one went stale.
 - Configs are stored in `config.py`, so one can change the websocket URL if Kick changes it, ping interval, messages, etc.
 - Raw payloads are stored for debugging, though this increases storage requirements.
 - Each channel gets its own database table for better query performance and easier data management.
@@ -97,9 +98,8 @@ Each channel gets its own table (prefixed with `kickchat_` on default) containin
 ## Known Issues
 
 - The logging is not the best, gets the job done.
-- If a channel gets banned or renamed while being logged, Pusher may still accept the subscription, so `list` can show it as running while it logs nothing. There is no automatic staleness detection, check `stats` once in a while.
+- If a channel gets banned or renamed while being logged, Pusher may still accept the subscription, so `list` can show it as running while it logs nothing. There is no automatic staleness detection, check `stats` once in a while and `resume <channel>` anything suspicious to refresh it.
 - Channels that fail to subscribe (bans, renames, lookup errors) show as errored in `list` and stay that way until manually retried with `resume <channel>`.
-- Startup does one API lookup per channel with capped concurrency (see `CHANNEL_LOOKUP_CONCURRENCY` in `config.py`), so starting hundreds of channels takes a while. Chatroom IDs are not persisted between runs.
 
 ## Contact
 

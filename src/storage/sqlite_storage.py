@@ -95,11 +95,17 @@ class SQLiteStorage(StorageInterface):
             name TEXT UNIQUE NOT NULL,
             added_at TEXT NOT NULL,
             paused BOOLEAN DEFAULT FALSE,
-            paused_at TEXT
+            paused_at TEXT,
+            chatroom_id INTEGER
         );
         """
         try:
             await db.execute(create_table_sql)
+            # databases from before the chatroom_id column get it added here
+            async with db.execute("PRAGMA table_info(channels)") as cursor:
+                columns = [row[1] for row in await cursor.fetchall()]
+            if "chatroom_id" not in columns:
+                await db.execute("ALTER TABLE channels ADD COLUMN chatroom_id INTEGER")
             await db.commit()
             logger.info("Channels table created successfully")
             return True
@@ -361,6 +367,61 @@ class SQLiteStorage(StorageInterface):
 
         except sqlite3.Error as e:
             logger.error("Failed to unpause channel %s: %s", normalized_name, e)
+            return False
+
+    async def get_chatroom_id(self, channel_name: str) -> Optional[int]:
+        """
+        Returns the stored chatroom ID for a channel, if known.
+
+        Args:
+            channel_name (str): The name of the channel
+
+        Returns:
+            Optional[int]: The chatroom ID, or None if not stored
+        """
+        normalized_name = sanitize_channel_name(channel_name)
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute(
+                    "SELECT chatroom_id FROM channels WHERE name = ?",
+                    (normalized_name,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    return row[0] if row else None
+
+        except sqlite3.Error as e:
+            logger.error("Failed to get chatroom ID for %s: %s", normalized_name, e)
+            return None
+
+    async def set_chatroom_id(self, channel_name: str, chatroom_id: int) -> bool:
+        """
+        Stores the chatroom ID for a channel.
+
+        Args:
+            channel_name (str): The name of the channel
+            chatroom_id (int): The chatroom ID to store
+
+        Returns:
+            bool: True if stored successfully, False otherwise
+        """
+        normalized_name = sanitize_channel_name(channel_name)
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    "UPDATE channels SET chatroom_id = ? WHERE name = ?",
+                    (chatroom_id, normalized_name),
+                )
+                await db.commit()
+
+            logger.debug(
+                "Stored chatroom ID %s for channel %s", chatroom_id, normalized_name
+            )
+            return True
+
+        except sqlite3.Error as e:
+            logger.error("Failed to set chatroom ID for %s: %s", normalized_name, e)
             return False
 
     async def get_active_channels(self) -> List[str]:

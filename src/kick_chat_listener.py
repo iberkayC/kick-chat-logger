@@ -25,6 +25,7 @@ from config import (
     HANDLED_EVENTS,
     IGNORED_EVENTS,
     UNHANDLED_MESSAGES_FILE,
+    CHANNEL_LOOKUP_CONCURRENCY,
     PING_INTERVAL_SECONDS,
     PING_TIMEOUT_SECONDS,
     PUSHER_INTERNAL_SUBSCRIPTION_SUCCEEDED_EVENT,
@@ -70,7 +71,7 @@ class ChannelSub:
     """
 
     channel_name: str
-    chatroom_id: str
+    chatroom_id: int
     pusher_channel: str
     queue: asyncio.Queue
     state: str = PENDING
@@ -97,13 +98,18 @@ class ChatConnectionManager:
         self._connected = False
         self._closing = False
         self._runner: Optional[asyncio.Task] = None
+        # every chatroom-id lookup goes through this cap, otherwise a mass
+        # ack-timeout after a reconnect could burst thousands of concurrent
+        # requests at the kick api
+        self._lookup_sem = asyncio.Semaphore(CHANNEL_LOOKUP_CONCURRENCY)
 
-    async def subscribe(self, channel_name: str) -> bool:
+    async def subscribe(self, channel_name: str, refresh: bool = False) -> bool:
         """
         Subscribe a channel on the shared connection and start logging it.
 
         Args:
             channel_name (str): The name of the channel to subscribe
+            refresh (bool): Skip the stored chatroom ID and look it up fresh
 
         Returns:
             bool: True if the channel is subscribed (or already was)
@@ -115,13 +121,21 @@ class ChatConnectionManager:
         sub = self._channels.get(channel_name)
         if sub is not None:
             if sub.state == ERRORED:
-                # tear the failed sub down and redo it from scratch
+                # tear the failed sub down and redo it from scratch,
+                # distrusting the stored chatroom id
                 await self.unsubscribe(channel_name)
+                refresh = True
             else:
                 logger.warning("Channel %s is already subscribed", channel_name)
                 return True
 
-        chatroom_id = await get_chatroom_id(channel_name)
+        chatroom_id = None
+        if not refresh:
+            chatroom_id = await self.storage.get_chatroom_id(channel_name)
+        if chatroom_id is None:
+            async with self._lookup_sem:
+                chatroom_id = await get_chatroom_id(channel_name)
+            await self.storage.set_chatroom_id(channel_name, chatroom_id)
         logger.info("Chatroom ID for %s: %s", channel_name, chatroom_id)
 
         sub = ChannelSub(
@@ -344,7 +358,8 @@ class ChatConnectionManager:
             # no ack, the chatroom id may be stale (channel recreated),
             # look it up again before the next attempt
             try:
-                chatroom_id = await get_chatroom_id(sub.channel_name)
+                async with self._lookup_sem:
+                    chatroom_id = await get_chatroom_id(sub.channel_name)
             except ChannelNotFoundError as e:
                 logger.error(
                     "Channel %s no longer exists on Kick, stopping: %s",
@@ -370,6 +385,7 @@ class ChatConnectionManager:
                 sub.chatroom_id = chatroom_id
                 sub.pusher_channel = f"chatrooms.{chatroom_id}.v2"
                 self._routes[sub.pusher_channel] = sub.channel_name
+                await self.storage.set_chatroom_id(sub.channel_name, chatroom_id)
 
         logger.error(
             "No subscription ack for %s after %d attempts, marking errored",
@@ -479,7 +495,7 @@ class ChatConnectionManager:
                 await sub.consumer_task
 
 
-async def get_chatroom_id(channel_name: str) -> str:
+async def get_chatroom_id(channel_name: str) -> int:
     """
     Fetches and returns the chatroom ID for a given channel name.
 
@@ -487,7 +503,7 @@ async def get_chatroom_id(channel_name: str) -> str:
         channel_name (str): The name of the channel to get the chatroom ID for
 
     Returns:
-        str: The chatroom ID for the given channel name
+        int: The chatroom ID for the given channel name
 
     Raises:
         ChannelNotFoundError: If the channel does not exist on Kick (404).

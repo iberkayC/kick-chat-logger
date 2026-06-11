@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from kick_event import KickEvent
 
 
@@ -82,6 +82,31 @@ class StorageInterface(ABC):
 
         Returns:
             bool: True if resumed successfully, False otherwise
+        """
+
+    @abstractmethod
+    async def get_chatroom_id(self, channel_name: str) -> Optional[int]:
+        """
+        Returns the stored chatroom ID for a channel, if known.
+
+        Args:
+            channel_name (str): The name of the channel
+
+        Returns:
+            Optional[int]: The chatroom ID, or None if not stored
+        """
+
+    @abstractmethod
+    async def set_chatroom_id(self, channel_name: str, chatroom_id: int) -> bool:
+        """
+        Stores the chatroom ID for a channel.
+
+        Args:
+            channel_name (str): The name of the channel
+            chatroom_id (int): The chatroom ID to store
+
+        Returns:
+            bool: True if stored successfully, False otherwise
         """
 
     @abstractmethod

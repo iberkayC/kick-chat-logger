@@ -71,7 +71,7 @@ PING_TIMEOUT_SECONDS = 30
 # kick_api.py
 KICK_API_V2_URL = "https://kick.com/api/v2/channels/"
 
-# caps concurrent chatroom-id lookups when resuming channels at startup
+# caps concurrent chatroom-id lookups against the kick api
 CHANNEL_LOOKUP_CONCURRENCY = 10
 
 # Storage Configuration
