@@ -11,7 +11,8 @@ The tool connects to Kick.com's WebSocket to log live chat events in real time. 
 ## Technical Notes
 
 ### How it Works
-- Everything runs asynchronously with `asyncio`, so you can scrape a lot of channels at once without blocking (tested for 100~ channels simultaneously without issues).
+- Everything runs asynchronously with `asyncio`, so you can scrape a lot of channels at once without blocking (soak tested with 100 channels for 30+ hours without issues).
+- All channels are multiplexed over a single Pusher WebSocket connection. Each channel gets its own queue and consumer, so one busy channel can't stall the others.
 - The code is split up into logical pieces: API handling, database operations, websocket and event handling, and the CLI.
 - Each type of Kick event (chat, subs, bans, etc.) gets its own parsing logic, so one can change the way events are handled.
 
@@ -23,8 +24,8 @@ The tool connects to Kick.com's WebSocket to log live chat events in real time. 
 
 ### Some Design Choices
 - Channel names get cleaned up before being used as table names, so unique names are guaranteed, this handling might not cover all edge cases, but is sufficient.
-- If the connection drops, it'll keep retrying with exponential backoff instead of spamming the server to not get blocked.
-- The WebSocket connection self-pings every some minutes (see `PING_INTERVAL_MINUTES` in `config.py`) to stay alive.
+- If the connection drops, it'll keep retrying forever with capped exponential backoff and jitter instead of spamming the server. Channel-level failures (banned or renamed channels) are marked as errored instead and can be retried with `resume <channel>`.
+- The WebSocket connection self-pings (see `PING_INTERVAL_SECONDS` in `config.py`) to stay alive and notice dead connections quickly, and answers Pusher's application-level pings.
 - Configs are stored in `config.py`, so one can change the websocket URL if Kick changes it, ping interval, messages, etc.
 - Raw payloads are stored for debugging, though this increases storage requirements.
 - Each channel gets its own database table for better query performance and easier data management.
@@ -34,7 +35,7 @@ The tool connects to Kick.com's WebSocket to log live chat events in real time. 
 1. **Clone the repository**:
    ```
    git clone https://github.com/iberkayC/kick-chat-logger
-   cd kick-chat-logger/src
+   cd kick-chat-logger
    ```
 
 2. **Use a virtual environment**:
@@ -52,6 +53,7 @@ The tool connects to Kick.com's WebSocket to log live chat events in real time. 
 
 ### Start the scraper
 ```
+cd src
 python cli.py
 ```
 
@@ -61,7 +63,7 @@ python cli.py
 - `resume <channel_name>` - Resume monitoring a paused channel
 - `list` - Show all channels and their status
 - `stats <channel_name>` - Display statistics for a specific channel
-- `resume` - Resume all channels (needs improvement, temporary solution)
+- `resume` - Restart all active channels
 - `help` - Show available commands
 - `exit` - Shutdown the scraper
 
@@ -95,8 +97,9 @@ Each channel gets its own table (prefixed with `kickchat_` on default) containin
 ## Known Issues
 
 - The logging is not the best, gets the job done.
-- Before all websocket connection closeds were handled, sometimes the `PAUSED` and `SCRAPING` states were not synchronized. Now, it's probably fixed, but they are not explicitly synchronized. So, one might need to resume manually even though the channel is already resumed. Retrying till connected is not a good idea, because of bans, name changes, etc. The synchronization fix is not hard, but I didn't do it as a choice.
-- If you are scraping a lot of channels, the startup is slow, this is not really fixable, but one might want to make it run on the background and allow CLI input.
+- If a channel gets banned or renamed while being logged, Pusher may still accept the subscription, so `list` can show it as running while it logs nothing. There is no automatic staleness detection, check `stats` once in a while.
+- Channels that fail to subscribe (bans, renames, lookup errors) show as errored in `list` and stay that way until manually retried with `resume <channel>`.
+- Startup does one API lookup per channel with capped concurrency (see `CHANNEL_LOOKUP_CONCURRENCY` in `config.py`), so starting hundreds of channels takes a while. Chatroom IDs are not persisted between runs.
 
 ## Contact
 
