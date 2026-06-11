@@ -37,6 +37,8 @@ POLL_UPDATE_EVENT = r"App\Events\PollUpdateEvent"
 POLL_DELETE_EVENT = r"App\Events\PollDeleteEvent"
 PUSHER_CONNECTION_ESTABLISHED_EVENT = "pusher:connection_established"
 PUSHER_INTERNAL_SUBSCRIPTION_SUCCEEDED_EVENT = "pusher_internal:subscription_succeeded"
+PUSHER_PING_EVENT = "pusher:ping"
+PUSHER_PONG_EVENT = "pusher:pong"
 
 HANDLED_EVENTS = {
     CHAT_MESSAGE_EVENT,
@@ -61,7 +63,10 @@ IGNORED_EVENTS = {
 
 UNHANDLED_MESSAGES_FILE = "unhandled_messages.txt"
 
-PING_INTERVAL_MINUTES = 10
+# transport-level websocket ping cadence, bounds how long a dead
+# connection can go unnoticed
+PING_INTERVAL_SECONDS = 60
+PING_TIMEOUT_SECONDS = 30
 
 # kick_api.py
 KICK_API_V2_URL = "https://kick.com/api/v2/channels/"

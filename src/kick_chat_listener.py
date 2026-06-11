@@ -8,6 +8,7 @@ It also handles the messages from the websocket.
 
 import json
 import logging
+import random
 import asyncio
 import contextlib
 from dataclasses import dataclass, field
@@ -24,8 +25,11 @@ from config import (
     HANDLED_EVENTS,
     IGNORED_EVENTS,
     UNHANDLED_MESSAGES_FILE,
-    PING_INTERVAL_MINUTES,
+    PING_INTERVAL_SECONDS,
+    PING_TIMEOUT_SECONDS,
     PUSHER_INTERNAL_SUBSCRIPTION_SUCCEEDED_EVENT,
+    PUSHER_PING_EVENT,
+    PUSHER_PONG_EVENT,
 )
 
 
@@ -41,11 +45,9 @@ SUBSCRIBE_ACK_RETRIES = 2
 QUEUE_MAXSIZE = 1000
 DRAIN_TIMEOUT = 5
 
-# reconnect backoff
-CONNECTION_BASE_DELAY = 1  # server restart / ping timeout (4200, 1011)
-MAX_CONNECTION_RETRIES = 50
+# reconnect backoff, the runner retries forever
+CONNECTION_BASE_DELAY = 1  # pusher's reconnect-immediately class (4200-4299, 1011)
 BASE_DELAY = 2  # everything else
-MAX_RETRIES = 10
 MAX_BACKOFF_DELAY = 30
 
 
@@ -216,8 +218,7 @@ class ChatConnectionManager:
         self._routes.clear()
 
     def _ensure_runner(self) -> None:
-        # (re)start the connection loop if it isn't running, either the
-        # first subscribe or a revive after the backoff gave up
+        # start the connection loop if it isn't running yet
         if self._runner is None or self._runner.done():
             self._closing = False
             self._runner = asyncio.create_task(self._run())
@@ -225,7 +226,8 @@ class ChatConnectionManager:
     async def _run(self) -> None:
         """
         Connection loop: connect, resubscribe everything, read frames until
-        the connection drops, back off, repeat.
+        the connection drops, back off, repeat. Never gives up, only close()
+        stops it.
 
         Returns:
             None
@@ -238,8 +240,8 @@ class ChatConnectionManager:
             try:
                 async with websockets.connect(
                     WEBSOCKET_URL,
-                    ping_interval=PING_INTERVAL_MINUTES * 60,
-                    ping_timeout=60,
+                    ping_interval=PING_INTERVAL_SECONDS,
+                    ping_timeout=PING_TIMEOUT_SECONDS,
                 ) as ws:
                     self._ws = ws
                     self._connected = True
@@ -267,41 +269,32 @@ class ChatConnectionManager:
                 break
 
             error_code = getattr(error, "code", None)
-            if error_code in (4200, 1011):  # server restart or ping timeout
+            if error_code == 1011 or (
+                error_code is not None and 4200 <= error_code <= 4299
+            ):
+                # 4200-4299 is pusher's "reconnect immediately" class
                 connection_retries += 1
-                if connection_retries > MAX_CONNECTION_RETRIES:
-                    logger.error(
-                        "Max connection retries exceeded (error %s), giving up",
-                        error_code,
-                    )
-                    break
                 delay = min(
                     CONNECTION_BASE_DELAY * (1.5 ** min(connection_retries, 8)),
                     MAX_BACKOFF_DELAY,
                 )
-                attempt, max_attempts = connection_retries, MAX_CONNECTION_RETRIES
+                attempt = connection_retries
             else:
                 other_retries += 1
-                if other_retries > MAX_RETRIES:
-                    logger.error("Max retries exceeded, giving up: %s", error)
-                    break
-                delay = min(BASE_DELAY * (2 ** (other_retries - 1)), MAX_BACKOFF_DELAY)
-                attempt, max_attempts = other_retries, MAX_RETRIES
+                delay = min(
+                    BASE_DELAY * (2 ** min(other_retries - 1, 8)), MAX_BACKOFF_DELAY
+                )
+                attempt = other_retries
+            # jitter so retries don't land in lockstep
+            delay += random.uniform(0, delay / 4)
 
             logger.warning(
-                "WebSocket connection lost (%s, attempt %d/%d). Reconnecting in %.1f seconds...",
+                "WebSocket connection lost (%s, attempt %d). Reconnecting in %.1f seconds...",
                 error if error is not None else "closed cleanly",
                 attempt,
-                max_attempts,
                 delay,
             )
             await asyncio.sleep(delay)
-
-        if not self._closing:
-            # gave up. leave the subs registered so `list` shows the damage,
-            # any subscribe/resume restarts the runner via _ensure_runner
-            for sub in self._channels.values():
-                sub.state = ERRORED
 
     def _resubscribe_all(self) -> None:
         # fire-and-forget on purpose: acks arrive on this same socket, so the
@@ -404,6 +397,16 @@ class ChatConnectionManager:
             return
         if not isinstance(message, dict):
             logger.warning("Dropping non-object frame: %.200s", raw)
+            return
+
+        # pusher pings quiet connections at the application level and
+        # closes with 4201 unless it gets a pong back
+        if message.get("event") == PUSHER_PING_EVENT:
+            ws = self._ws
+            if ws is not None:
+                pong = {"event": PUSHER_PONG_EVENT, "data": {}}
+                with contextlib.suppress(websockets.exceptions.ConnectionClosed):
+                    await ws.send(json.dumps(pong))
             return
 
         channel_name = self._routes.get(message.get("channel"))
