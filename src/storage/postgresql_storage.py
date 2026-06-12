@@ -64,6 +64,7 @@ class PostgreSQLStorage(StorageInterface):
         self.max_connections = max_connections
         self.command_timeout = command_timeout
         self.pool: asyncpg.Pool | None = None
+        self._known_channels: set[str] = set()  # names validated against the db
 
     @property
     def _pool(self) -> asyncpg.Pool:
@@ -208,6 +209,7 @@ class PostgreSQLStorage(StorageInterface):
                 )
 
                 if table_created:
+                    self._known_channels.add(normalized_name)
                     logger.info(
                         "Channel %s (normalized: %s) added successfully",
                         channel_name,
@@ -285,10 +287,16 @@ class PostgreSQLStorage(StorageInterface):
         """
         normalized_name = sanitize_channel_name(channel_name)
 
+        # channels are never deleted, so a name that validated once stays
+        # valid and the cache only grows
+        if normalized_name in self._known_channels:
+            return normalized_name
+
         if not await self.channel_exists(normalized_name):
             logger.error("Channel does not exist: %s", normalized_name)
             return None
 
+        self._known_channels.add(normalized_name)
         return normalized_name
 
     async def store_event(self, channel_name: str, event: KickEvent) -> bool:

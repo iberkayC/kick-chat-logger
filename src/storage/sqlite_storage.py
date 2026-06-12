@@ -49,6 +49,7 @@ class SQLiteStorage(StorageInterface):
         self._lock = asyncio.Lock()
         self._pending = 0  # inserts awaiting commit
         self._flush_task: asyncio.Task | None = None
+        self._known_channels: set[str] = set()  # names validated against the db
 
     @property
     def _connection(self) -> aiosqlite.Connection:
@@ -275,6 +276,7 @@ class SQLiteStorage(StorageInterface):
                     await db.rollback()
                     raise
 
+            self._known_channels.add(normalized_name)
             logger.info(
                 "Channel %s (normalized: %s) added successfully",
                 channel_name,
@@ -356,10 +358,16 @@ class SQLiteStorage(StorageInterface):
         """
         normalized_name = sanitize_channel_name(channel_name)
 
+        # channels are never deleted, so a name that validated once stays
+        # valid and the cache only grows
+        if normalized_name in self._known_channels:
+            return normalized_name
+
         if not await self.channel_exists(normalized_name):
             logger.error("Channel does not exist: %s", normalized_name)
             return None
 
+        self._known_channels.add(normalized_name)
         return normalized_name
 
     async def store_event(self, channel_name: str, kick_event: KickEvent) -> bool:
