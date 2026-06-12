@@ -23,6 +23,7 @@ from kick_chat_listener import (
     ChatroomIdError,
 )
 from storage.storage_factory import create_storage
+from utils.sanitize_validate import sanitize_channel_name
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -169,12 +170,12 @@ class KickChatLogger:
         names = []
         seen = set()
         for line in lines:
-            name = line.strip()
+            name = sanitize_channel_name(line)
             if not name or name.startswith("#"):
                 continue
-            if name.lower() in seen:
+            if name in seen:
                 continue
-            seen.add(name.lower())
+            seen.add(name)
             names.append(name)
 
         if not names:
@@ -457,7 +458,7 @@ class KickChatLogger:
             await self.cleanup_and_exit()
 
         elif cmd == "add" and len(parts) == 2:
-            channel_name = parts[1]
+            channel_name = sanitize_channel_name(parts[1])
             await self.add_channel(channel_name)
 
         # maxsplit so file names with spaces survive
@@ -468,12 +469,12 @@ class KickChatLogger:
             await self.list_channels()
 
         elif cmd == "pause" and len(parts) == 2:
-            channel_name = parts[1]
+            channel_name = sanitize_channel_name(parts[1])
             await self.pause_channel(channel_name)
 
         # if an argument is given, resume the channel
         elif cmd == "resume" and len(parts) == 2:
-            channel_name = parts[1]
+            channel_name = sanitize_channel_name(parts[1])
             await self.resume_channel(channel_name)
 
         # if no argument is given, resume all channels
@@ -482,7 +483,7 @@ class KickChatLogger:
             await self.load_and_start_active_channels()
 
         elif cmd == "stats" and len(parts) == 2:
-            channel_name = parts[1]
+            channel_name = sanitize_channel_name(parts[1])
             await self.show_stats(channel_name)
 
         elif cmd == "help":

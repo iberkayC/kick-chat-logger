@@ -186,6 +186,9 @@ async def get_channel_info(
     except curl_cffi.exceptions.Timeout:
         logger.warning("Request timed out for channel %s", channel_name)
         return ApiResult(success=False, error="Request timed out")
+    except curl_cffi.exceptions.RequestException as e:
+        logger.warning("Request failed for channel %s: %s", channel_name, e)
+        return ApiResult(success=False, error=f"Request failed: {e}")
 
 
 # # not used, might be useful later
