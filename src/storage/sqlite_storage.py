@@ -2,8 +2,12 @@
 
 Manages SQLite database operations for storing chat messages,
 subscriptions, bans, and other events from Kick chat streams.
+
+All operations share one long-lived connection, serialized by a lock.
 """
 
+import asyncio
+import contextlib
 import logging
 import os
 import sqlite3
@@ -24,6 +28,11 @@ from utils.sanitize_validate import (
 
 logger = logging.getLogger(__name__)
 
+# store_event batches inserts into one commit, so a crash can lose at most
+# COMMIT_BATCH_SIZE events or COMMIT_INTERVAL_SECONDS worth of chat
+COMMIT_BATCH_SIZE = 100
+COMMIT_INTERVAL_SECONDS = 1.0
+
 
 class SQLiteStorage(StorageInterface):
     """Handles database storage for Kick chat events."""
@@ -36,9 +45,19 @@ class SQLiteStorage(StorageInterface):
 
         """
         self.db_path = db_path
+        self._db: aiosqlite.Connection | None = None
+        self._lock = asyncio.Lock()
+        self._pending = 0  # inserts awaiting commit
+        self._flush_task: asyncio.Task | None = None
+
+    @property
+    def _connection(self) -> aiosqlite.Connection:
+        if self._db is None:
+            raise RuntimeError("Storage not initialized. Call initialize() first.")
+        return self._db
 
     async def initialize(self) -> bool:
-        """Initialize the database and create the channels table if it doesn't exist.
+        """Open the shared database connection and create the channels table.
 
         Returns:
             bool: True if initialized successfully, False otherwise
@@ -50,18 +69,77 @@ class SQLiteStorage(StorageInterface):
                 os.makedirs(db_dir, exist_ok=True)
                 logger.info("Created database directory: %s", db_dir)
 
-            async with aiosqlite.connect(self.db_path) as db:
-                await self._enable_wal_mode(db)
-                await self._create_channels_table(db)
+            self._db = await aiosqlite.connect(self.db_path)
+            await self._enable_wal_mode(self._db)
+            await self._create_channels_table(self._db)
 
             logger.info("Database initialized successfully")
             return True
         except (sqlite3.Error, OSError) as e:
             logger.error("Failed to initialize database: %s", e)
+            if self._db is not None:
+                with contextlib.suppress(sqlite3.Error):
+                    await self._db.close()
+                self._db = None
             return False
 
+    async def close(self) -> None:
+        """Commit any batched inserts and close the database connection.
+
+        Returns:
+            None
+
+        """
+        if self._flush_task is not None:
+            self._flush_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._flush_task
+            self._flush_task = None
+
+        if self._db is None:
+            return
+        try:
+            async with self._lock:
+                await self._commit()
+        except sqlite3.Error as e:
+            logger.error("Failed to commit batched events on close: %s", e)
+        with contextlib.suppress(sqlite3.Error):
+            await self._db.close()
+        self._db = None
+        logger.info("Database connection closed")
+
+    async def _commit(self) -> None:
+        """Commit the open transaction, including any batched inserts.
+
+        Caller must hold self._lock.
+
+        Returns:
+            None
+
+        """
+        await self._connection.commit()
+        self._pending = 0
+
+    async def _flush_later(self) -> None:
+        """Commit batched inserts once COMMIT_INTERVAL_SECONDS have passed.
+
+        Returns:
+            None
+
+        """
+        await asyncio.sleep(COMMIT_INTERVAL_SECONDS)
+        try:
+            async with self._lock:
+                if self._pending:
+                    await self._commit()
+        except sqlite3.Error as e:
+            logger.error("Failed to commit batched events: %s", e)
+
     async def _enable_wal_mode(self, db: aiosqlite.Connection) -> bool:
-        """Enable WAL mode for better concurrent access.
+        """Enable WAL mode and performance pragmas on a connection.
+
+        journal_mode persists in the database file, but the other pragmas
+        are per-connection and only hold while that connection is open.
 
         Args:
             db (aiosqlite.Connection): The database connection
@@ -173,26 +251,36 @@ class SQLiteStorage(StorageInterface):
         timestamp = normalize_timestamp(datetime.now(UTC))
 
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute(
-                    "INSERT INTO channels (name, added_at) VALUES (?, ?)",
-                    (normalized_name, timestamp),
-                )
+            async with self._lock:
+                db = self._connection
+                # flush batched inserts first so the rollback below can
+                # only ever discard this channel's half-created state
+                await self._commit()
+                try:
+                    await db.execute(
+                        "INSERT INTO channels (name, added_at) VALUES (?, ?)",
+                        (normalized_name, timestamp),
+                    )
 
-                table_created = await self._create_channel_chat_table(
-                    db,
-                    normalized_name,
-                )
-
-                if table_created:
-                    await db.commit()
-                    logger.info(
-                        "Channel %s (normalized: %s) added successfully",
-                        channel_name,
+                    table_created = await self._create_channel_chat_table(
+                        db,
                         normalized_name,
                     )
-                    return True
-                return False
+
+                    if not table_created:
+                        await db.rollback()
+                        return False
+                    await self._commit()
+                except sqlite3.Error:
+                    await db.rollback()
+                    raise
+
+            logger.info(
+                "Channel %s (normalized: %s) added successfully",
+                channel_name,
+                normalized_name,
+            )
+            return True
 
         except sqlite3.Error as e:
             logger.error("Failed to add channel %s: %s", channel_name, e)
@@ -207,24 +295,23 @@ class SQLiteStorage(StorageInterface):
 
         """
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                async with db.execute(
+            async with (
+                self._lock,
+                self._connection.execute(
                     "SELECT name, added_at, paused, paused_at FROM channels",
-                ) as cursor:
-                    rows = await cursor.fetchall()
+                ) as cursor,
+            ):
+                rows = await cursor.fetchall()
 
-                channels = []
-                for row in rows:
-                    channels.append(
-                        {
-                            "name": row[0],
-                            "added_at": row[1],
-                            "paused": bool(row[2]),
-                            "paused_at": row[3],
-                        },
-                    )
-
-                return channels
+            return [
+                {
+                    "name": row[0],
+                    "added_at": row[1],
+                    "paused": bool(row[2]),
+                    "paused_at": row[3],
+                }
+                for row in rows
+            ]
 
         except sqlite3.Error as e:
             logger.error("Failed to list channels: %s", e)
@@ -244,8 +331,8 @@ class SQLiteStorage(StorageInterface):
 
         try:
             async with (
-                aiosqlite.connect(self.db_path) as db,
-                db.execute(
+                self._lock,
+                self._connection.execute(
                     "SELECT 1 FROM channels WHERE name = ?",
                     (normalized_name,),
                 ) as cursor,
@@ -278,6 +365,9 @@ class SQLiteStorage(StorageInterface):
     async def store_event(self, channel_name: str, kick_event: KickEvent) -> bool:
         """Store any event to the channel's chat table.
 
+        The insert lands in the shared transaction and is committed in
+        batches, so a stored event may not be durable until the next flush.
+
         Args:
             channel_name (str): The name of the channel
             kick_event (KickEvent): The KickEvent dataclass instance containing event information
@@ -296,17 +386,24 @@ class SQLiteStorage(StorageInterface):
         # Prepare all event data for insertion
         prepared_data = prepare_event_data(kick_event)
 
-        try:
-            async with aiosqlite.connect(self.db_path) as db:
-                insert_sql = f"""
-                INSERT INTO {table_name} (
-                    event_type, event_id, chatroom_id, timestamp, user_id, username,
-                    content, sender_data, metadata, raw_payload, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """
+        insert_sql = f"""
+        INSERT INTO {table_name} (
+            event_type, event_id, chatroom_id, timestamp, user_id, username,
+            content, sender_data, metadata, raw_payload, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
 
-                await db.execute(insert_sql, prepared_data + (created_at_db,))
-                await db.commit()
+        try:
+            async with self._lock:
+                await self._connection.execute(
+                    insert_sql,
+                    prepared_data + (created_at_db,),
+                )
+                self._pending += 1
+                if self._pending >= COMMIT_BATCH_SIZE:
+                    await self._commit()
+                elif self._flush_task is None or self._flush_task.done():
+                    self._flush_task = asyncio.create_task(self._flush_later())
 
             logger.debug(
                 "Stored event for channel %s: %s",
@@ -334,13 +431,13 @@ class SQLiteStorage(StorageInterface):
             return False
 
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with self._lock:
                 timestamp = normalize_timestamp(datetime.now(UTC))
-                await db.execute(
+                await self._connection.execute(
                     "UPDATE channels SET paused = ?, paused_at = ? WHERE name = ?",
                     (True, timestamp, normalized_name),
                 )
-                await db.commit()
+                await self._commit()
 
             logger.info("Channel %s paused successfully", normalized_name)
             return True
@@ -364,12 +461,12 @@ class SQLiteStorage(StorageInterface):
             return False
 
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute(
+            async with self._lock:
+                await self._connection.execute(
                     "UPDATE channels SET paused = ? WHERE name = ?",
                     (False, normalized_name),
                 )
-                await db.commit()
+                await self._commit()
 
             logger.info("Channel %s unpaused successfully", normalized_name)
             return True
@@ -392,8 +489,8 @@ class SQLiteStorage(StorageInterface):
 
         try:
             async with (
-                aiosqlite.connect(self.db_path) as db,
-                db.execute(
+                self._lock,
+                self._connection.execute(
                     "SELECT chatroom_id FROM channels WHERE name = ?",
                     (normalized_name,),
                 ) as cursor,
@@ -419,12 +516,12 @@ class SQLiteStorage(StorageInterface):
         normalized_name = sanitize_channel_name(channel_name)
 
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute(
+            async with self._lock:
+                await self._connection.execute(
                     "UPDATE channels SET chatroom_id = ? WHERE name = ?",
                     (chatroom_id, normalized_name),
                 )
-                await db.commit()
+                await self._commit()
 
             logger.debug(
                 "Stored chatroom ID %s for channel %s",
@@ -446,8 +543,8 @@ class SQLiteStorage(StorageInterface):
         """
         try:
             async with (
-                aiosqlite.connect(self.db_path) as db,
-                db.execute(
+                self._lock,
+                self._connection.execute(
                     "SELECT name FROM channels WHERE paused = 0",
                 ) as cursor,
             ):
@@ -466,8 +563,8 @@ class SQLiteStorage(StorageInterface):
         """
         try:
             async with (
-                aiosqlite.connect(self.db_path) as db,
-                db.execute(
+                self._lock,
+                self._connection.execute(
                     "SELECT name FROM channels WHERE paused = 1",
                 ) as cursor,
             ):
@@ -480,10 +577,12 @@ class SQLiteStorage(StorageInterface):
     async def get_all_channels(self) -> list[str]:
         """Return a list of all channels."""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                async with db.execute("SELECT name FROM channels") as cursor:
-                    result = await cursor.fetchall()
-                    return [row[0] for row in result]
+            async with (
+                self._lock,
+                self._connection.execute("SELECT name FROM channels") as cursor,
+            ):
+                result = await cursor.fetchall()
+                return [row[0] for row in result]
         except sqlite3.Error as e:
             logger.error("Failed to get all channels: %s", e)
             return []
@@ -509,7 +608,9 @@ class SQLiteStorage(StorageInterface):
         table_name = get_channel_table_name(normalized_name)
 
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with self._lock:
+                db = self._connection
+
                 # Message counts by event type
                 async with db.execute(
                     f"""

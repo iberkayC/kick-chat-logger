@@ -616,5 +616,8 @@ class PostgreSQLStorage(StorageInterface):
 
     async def close(self) -> None:
         """Close the database connection pool."""
-        await self._pool.close()
+        if self.pool is None:
+            return
+        await self.pool.close()
+        self.pool = None
         logger.info("PostgreSQL connection pool closed")

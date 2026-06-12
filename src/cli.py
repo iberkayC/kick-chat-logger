@@ -380,7 +380,10 @@ class KickChatLogger:
         logger.info("Shutting down scraper...")
         self.running = False
 
+        # manager first: it drains the consumer queues into storage,
+        # storage.close() then flushes the batched commits
         await self.manager.close()
+        await self.storage.close()
         await close_session()
 
         logger.info("All scraping tasks stopped")

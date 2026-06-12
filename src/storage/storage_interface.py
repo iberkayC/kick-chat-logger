@@ -156,3 +156,14 @@ class StorageInterface(ABC):
                 - unique_users: Number of unique users
 
         """
+
+    @abstractmethod
+    async def close(self) -> None:
+        """Flush any buffered writes and close the storage.
+
+        Safe to call even if initialize() failed or was never called.
+
+        Returns:
+            None
+
+        """
