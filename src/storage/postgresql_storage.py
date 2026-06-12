@@ -1,36 +1,35 @@
-"""
-This module handles database storage for Kick chat events using PostgreSQL.
-It manages PostgreSQL database operations for storing chat messages, subscriptions,
-bans, and other events from Kick chat streams.
+"""Database storage for Kick chat events using PostgreSQL.
+
+Manages PostgreSQL database operations for storing chat messages,
+subscriptions, bans, and other events from Kick chat streams.
 """
 
 import logging
-from datetime import datetime, UTC
-import asyncpg
-from typing import Dict, List, Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
-from storage.storage_interface import StorageInterface
-from utils.sanitize_validate import (
-    sanitize_channel_name,
-    get_channel_table_name,
+import asyncpg
+
+from config import (
+    DEFAULT_PG_DB,
+    DEFAULT_PG_HOST,
+    DEFAULT_PG_PASSWORD,
+    DEFAULT_PG_PORT,
+    DEFAULT_PG_USER,
 )
 from kick_event import KickEvent
+from storage.storage_interface import StorageInterface
 from utils.data_preparation import prepare_event_data
-from config import (
-    DEFAULT_PG_HOST,
-    DEFAULT_PG_PORT,
-    DEFAULT_PG_DB,
-    DEFAULT_PG_USER,
-    DEFAULT_PG_PASSWORD,
+from utils.sanitize_validate import (
+    get_channel_table_name,
+    sanitize_channel_name,
 )
 
 logger = logging.getLogger(__name__)
 
 
 class PostgreSQLStorage(StorageInterface):
-    """
-    Handles database storage for Kick chat events using PostgreSQL.
-    """
+    """Handles database storage for Kick chat events using PostgreSQL."""
 
     def __init__(
         self,
@@ -43,8 +42,7 @@ class PostgreSQLStorage(StorageInterface):
         max_connections: int = 50,
         command_timeout: int = 30,
     ) -> None:
-        """
-        Initializes the PostgreSQL storage with connection parameters.
+        """Initialize the PostgreSQL storage with connection parameters.
 
         Args:
             host (str): PostgreSQL host address
@@ -55,6 +53,7 @@ class PostgreSQLStorage(StorageInterface):
             min_connections (int): Minimum connections in the pool
             max_connections (int): Maximum connections in the pool
             command_timeout (int): Command timeout in seconds
+
         """
         self.host = host
         self.port = port
@@ -64,7 +63,7 @@ class PostgreSQLStorage(StorageInterface):
         self.min_connections = min_connections
         self.max_connections = max_connections
         self.command_timeout = command_timeout
-        self.pool: Optional[asyncpg.Pool] = None
+        self.pool: asyncpg.Pool | None = None
 
     @property
     def _pool(self) -> asyncpg.Pool:
@@ -73,13 +72,12 @@ class PostgreSQLStorage(StorageInterface):
         return self.pool
 
     async def initialize(self) -> bool:
-        """
-        Initializes the database connection pool and creates the channels table if it doesn't exist.
+        """Initialize the database connection pool and create the channels table if it doesn't exist.
 
         Returns:
             bool: True if initialized successfully, False otherwise
-        """
 
+        """
         try:
             self.pool = await asyncpg.create_pool(
                 host=self.host,
@@ -99,20 +97,19 @@ class PostgreSQLStorage(StorageInterface):
             return True
 
         except (asyncpg.PostgresError, OSError) as e:
-            logger.error(f"Failed to initialize PostgreSQL database: {e}")
+            logger.error("Failed to initialize PostgreSQL database: %s", e)
             return False
 
     async def _create_channels_table(self, connection: asyncpg.Connection) -> bool:
-        """
-        Creates the channels table if it doesn't exist.
+        """Create the channels table if it doesn't exist.
 
         Args:
             connection (asyncpg.Connection): The database connection
 
         Returns:
             bool: True if created successfully, False otherwise
-        """
 
+        """
         create_table_sql = """
         CREATE TABLE IF NOT EXISTS channels (
             id SERIAL PRIMARY KEY,
@@ -128,20 +125,21 @@ class PostgreSQLStorage(StorageInterface):
             await connection.execute(create_table_sql)
             # databases from before the chatroom_id column get it added here
             await connection.execute(
-                "ALTER TABLE channels ADD COLUMN IF NOT EXISTS chatroom_id BIGINT"
+                "ALTER TABLE channels ADD COLUMN IF NOT EXISTS chatroom_id BIGINT",
             )
             logger.info("Channels table created successfully")
             return True
 
         except asyncpg.PostgresError as e:
-            logger.error(f"Failed to create channels table: {e}")
+            logger.error("Failed to create channels table: %s", e)
             return False
 
     async def _create_channel_chat_table(
-        self, connection: asyncpg.Connection, channel_name: str
+        self,
+        connection: asyncpg.Connection,
+        channel_name: str,
     ) -> bool:
-        """
-        Creates the channel chat table if it doesn't exist.
+        """Create the channel chat table if it doesn't exist.
 
         Args:
             connection (asyncpg.Connection): The database connection
@@ -149,6 +147,7 @@ class PostgreSQLStorage(StorageInterface):
 
         Returns:
             bool: True if created successfully, False otherwise
+
         """
         table_name = get_channel_table_name(channel_name)
 
@@ -171,24 +170,27 @@ class PostgreSQLStorage(StorageInterface):
 
         try:
             await connection.execute(create_table_sql)
-            logger.info(f"Channel chat table for {channel_name} created successfully")
+            logger.info("Channel chat table for %s created successfully", channel_name)
             return True
 
         except asyncpg.PostgresError as e:
-            logger.error(f"Failed to create channel chat table for {channel_name}: {e}")
+            logger.error(
+                "Failed to create channel chat table for %s: %s",
+                channel_name,
+                e,
+            )
             return False
 
     async def add_channel(self, channel_name: str) -> bool:
-        """
-        Adds a channel to the database and creates its chat table.
+        """Add a channel to the database and create its chat table.
 
         Args:
             channel_name (str): The name of the channel
 
         Returns:
             bool: True if added successfully, False otherwise
-        """
 
+        """
         normalized_name = sanitize_channel_name(channel_name)
         timestamp = datetime.now(UTC)
 
@@ -201,7 +203,8 @@ class PostgreSQLStorage(StorageInterface):
                 )
 
                 table_created = await self._create_channel_chat_table(
-                    connection, normalized_name
+                    connection,
+                    normalized_name,
                 )
 
                 if table_created:
@@ -214,22 +217,21 @@ class PostgreSQLStorage(StorageInterface):
                 return False
 
         except asyncpg.PostgresError as e:
-            logger.error(f"Failed to add channel {channel_name}: {e}")
+            logger.error("Failed to add channel %s: %s", channel_name, e)
             return False
 
-    async def list_all_channels(self) -> List[Dict[str, Any]]:
-        """
-        Lists all channels in the database.
+    async def list_all_channels(self) -> list[dict[str, Any]]:
+        """List all channels in the database.
 
         Returns:
             List[Dict[str, Any]]: A list of dictionaries containing channel info
             (name, added_at, paused, paused_at) or an empty list if the database is not initialized
-        """
 
+        """
         try:
             async with self._pool.acquire() as connection:
                 rows = await connection.fetch(
-                    "SELECT name, added_at, paused, paused_at FROM channels ORDER BY added_at DESC"
+                    "SELECT name, added_at, paused, paused_at FROM channels ORDER BY added_at DESC",
                 )
                 channels = []
                 for row in rows:
@@ -239,47 +241,47 @@ class PostgreSQLStorage(StorageInterface):
                             "added_at": row["added_at"],
                             "paused": row["paused"],
                             "paused_at": row["paused_at"],
-                        }
+                        },
                     )
                 return channels
 
         except asyncpg.PostgresError as e:
-            logger.error(f"Failed to list channels: {e}")
+            logger.error("Failed to list channels: %s", e)
             return []
 
     async def channel_exists(self, channel_name: str) -> bool:
-        """
-        Checks if a channel exists in the database.
+        """Check if a channel exists in the database.
 
         Args:
             channel_name (str): The name of the channel
 
         Returns:
             bool: True if the channel exists, False otherwise
-        """
 
+        """
         normalized_name = sanitize_channel_name(channel_name)
 
         try:
             async with self._pool.acquire() as connection:
                 result = await connection.fetchval(
-                    "SELECT 1 FROM channels WHERE name = $1", normalized_name
+                    "SELECT 1 FROM channels WHERE name = $1",
+                    normalized_name,
                 )
                 return result is not None
 
         except asyncpg.PostgresError as e:
-            logger.error(f"Failed to check if channel exists: {e}")
+            logger.error("Failed to check if channel exists: %s", e)
             return False
 
-    async def _validate_and_normalize_channel(self, channel_name: str) -> Optional[str]:
-        """
-        Validates and normalizes a channel name.
+    async def _validate_and_normalize_channel(self, channel_name: str) -> str | None:
+        """Validate and normalize a channel name.
 
         Args:
             channel_name (str): The name of the channel
 
         Returns:
             Optional[str]: The normalized channel name, or None if the channel does not exist
+
         """
         normalized_name = sanitize_channel_name(channel_name)
 
@@ -290,8 +292,7 @@ class PostgreSQLStorage(StorageInterface):
         return normalized_name
 
     async def store_event(self, channel_name: str, event: KickEvent) -> bool:
-        """
-        Stores any event to the channel's chat table.
+        """Store any event to the channel's chat table.
 
         Args:
             channel_name (str): The name of the channel
@@ -299,6 +300,7 @@ class PostgreSQLStorage(StorageInterface):
 
         Returns:
             bool: True if stored successfully, False otherwise
+
         """
         normalized_name = await self._validate_and_normalize_channel(channel_name)
         if not normalized_name:
@@ -327,7 +329,7 @@ class PostgreSQLStorage(StorageInterface):
                     try:
                         # Have to replace Z with +00:00, temporary solution for now
                         timestamp = datetime.fromisoformat(
-                            prepared_data[3].replace("Z", "+00:00")
+                            prepared_data[3].replace("Z", "+00:00"),
                         )
                     except ValueError:
                         logger.warning("Invalid timestamp format: %s", prepared_data[3])
@@ -362,23 +364,25 @@ class PostgreSQLStorage(StorageInterface):
                 )
 
             logger.debug(
-                "Stored event for channel %s: %s", normalized_name, prepared_data[0]
+                "Stored event for channel %s: %s",
+                normalized_name,
+                prepared_data[0],
             )
             return True
 
         except asyncpg.PostgresError as e:
-            logger.error(f"Failed to store event for channel {normalized_name}: {e}")
+            logger.error("Failed to store event for channel %s: %s", normalized_name, e)
             return False
 
     async def pause_channel(self, channel_name: str) -> bool:
-        """
-        Pauses a channel (sets paused = True and updates paused_at).
+        """Pause a channel (sets paused = True and updates paused_at).
 
         Args:
             channel_name (str): The name of the channel to pause
 
         Returns:
             bool: True if paused successfully, False otherwise
+
         """
         normalized_name = await self._validate_and_normalize_channel(channel_name)
         if not normalized_name:
@@ -397,18 +401,18 @@ class PostgreSQLStorage(StorageInterface):
                 return True
 
         except asyncpg.PostgresError as e:
-            logger.error(f"Failed to pause channel {normalized_name}: {e}")
+            logger.error("Failed to pause channel %s: %s", normalized_name, e)
             return False
 
     async def resume_channel(self, channel_name: str) -> bool:
-        """
-        Resumes a channel (sets paused = False, keeps paused_at for history).
+        """Resume a channel (sets paused = False, keeps paused_at for history).
 
         Args:
             channel_name (str): The name of the channel to resume
 
         Returns:
             bool: True if resumed successfully, False otherwise
+
         """
         normalized_name = await self._validate_and_normalize_channel(channel_name)
         if not normalized_name:
@@ -425,18 +429,18 @@ class PostgreSQLStorage(StorageInterface):
                 return True
 
         except asyncpg.PostgresError as e:
-            logger.error(f"Failed to resume channel {normalized_name}: {e}")
+            logger.error("Failed to resume channel %s: %s", normalized_name, e)
             return False
 
-    async def get_chatroom_id(self, channel_name: str) -> Optional[int]:
-        """
-        Returns the stored chatroom ID for a channel, if known.
+    async def get_chatroom_id(self, channel_name: str) -> int | None:
+        """Return the stored chatroom ID for a channel, if known.
 
         Args:
             channel_name (str): The name of the channel
 
         Returns:
             Optional[int]: The chatroom ID, or None if not stored
+
         """
         normalized_name = sanitize_channel_name(channel_name)
 
@@ -448,12 +452,11 @@ class PostgreSQLStorage(StorageInterface):
                 )
 
         except asyncpg.PostgresError as e:
-            logger.error(f"Failed to get chatroom ID for {normalized_name}: {e}")
+            logger.error("Failed to get chatroom ID for %s: %s", normalized_name, e)
             return None
 
     async def set_chatroom_id(self, channel_name: str, chatroom_id: int) -> bool:
-        """
-        Stores the chatroom ID for a channel.
+        """Store the chatroom ID for a channel.
 
         Args:
             channel_name (str): The name of the channel
@@ -461,6 +464,7 @@ class PostgreSQLStorage(StorageInterface):
 
         Returns:
             bool: True if stored successfully, False otherwise
+
         """
         normalized_name = sanitize_channel_name(channel_name)
 
@@ -473,71 +477,72 @@ class PostgreSQLStorage(StorageInterface):
                 )
 
             logger.debug(
-                "Stored chatroom ID %s for channel %s", chatroom_id, normalized_name
+                "Stored chatroom ID %s for channel %s",
+                chatroom_id,
+                normalized_name,
             )
             return True
 
         except asyncpg.PostgresError as e:
-            logger.error(f"Failed to set chatroom ID for {normalized_name}: {e}")
+            logger.error("Failed to set chatroom ID for %s: %s", normalized_name, e)
             return False
 
-    async def get_active_channels(self) -> List[str]:
-        """
-        Returns a list of all active (unpaused) channels.
+    async def get_active_channels(self) -> list[str]:
+        """Return a list of all active (unpaused) channels.
 
         Returns:
             List[str]: List of active channel names
+
         """
         try:
             async with self._pool.acquire() as connection:
                 rows = await connection.fetch(
-                    "SELECT name FROM channels WHERE paused = FALSE ORDER BY added_at DESC"
+                    "SELECT name FROM channels WHERE paused = FALSE ORDER BY added_at DESC",
                 )
                 return [row["name"] for row in rows]
 
         except asyncpg.PostgresError as e:
-            logger.error(f"Failed to get active channels: {e}")
+            logger.error("Failed to get active channels: %s", e)
             return []
 
-    async def get_paused_channels(self) -> List[str]:
-        """
-        Returns a list of all paused channels.
+    async def get_paused_channels(self) -> list[str]:
+        """Return a list of all paused channels.
 
         Returns:
             List[str]: List of paused channel names
+
         """
         try:
             async with self._pool.acquire() as connection:
                 rows = await connection.fetch(
-                    "SELECT name FROM channels WHERE paused = TRUE ORDER BY paused_at DESC"
+                    "SELECT name FROM channels WHERE paused = TRUE ORDER BY paused_at DESC",
                 )
                 return [row["name"] for row in rows]
 
         except asyncpg.PostgresError as e:
-            logger.error(f"Failed to get paused channels: {e}")
+            logger.error("Failed to get paused channels: %s", e)
             return []
 
-    async def get_all_channels(self) -> List[str]:
-        """
-        Returns a list of all channels.
+    async def get_all_channels(self) -> list[str]:
+        """Return a list of all channels.
 
         Returns:
             List[str]: List of all channel names
+
         """
         try:
             async with self._pool.acquire() as connection:
                 rows = await connection.fetch(
-                    "SELECT name FROM channels ORDER BY added_at DESC"
+                    "SELECT name FROM channels ORDER BY added_at DESC",
                 )
                 return [row["name"] for row in rows]
 
         except asyncpg.PostgresError as e:
-            logger.error(f"Failed to get all channels: {e}")
+            logger.error("Failed to get all channels: %s", e)
             return []
 
-    async def get_channel_stats(self, channel_name: str) -> Dict[str, Any]:
-        """
-        Gets the stats for a channel.
+    async def get_channel_stats(self, channel_name: str) -> dict[str, Any]:
+        """Get the stats for a channel.
 
         Args:
             channel_name (str): The name of the channel
@@ -548,6 +553,7 @@ class PostgreSQLStorage(StorageInterface):
                 - total_messages: Total number of events/messages
                 - date_range: Tuple of (min_timestamp, max_timestamp)
                 - unique_users: Number of unique users
+
         """
         normalized_name = await self._validate_and_normalize_channel(channel_name)
         if not normalized_name:
@@ -563,7 +569,7 @@ class PostgreSQLStorage(StorageInterface):
                     FROM {table_name}
                     GROUP BY event_type
                     ORDER BY count DESC
-                    """
+                    """,
                 )
 
                 event_counts = {
@@ -571,15 +577,15 @@ class PostgreSQLStorage(StorageInterface):
                 }
 
                 total_messages = await connection.fetchval(
-                    f"SELECT COUNT(*) FROM {table_name}"
+                    f"SELECT COUNT(*) FROM {table_name}",
                 )
 
                 date_range = await connection.fetchrow(
-                    f"SELECT MIN(created_at) as min_date, MAX(created_at) as max_date FROM {table_name}"
+                    f"SELECT MIN(created_at) as min_date, MAX(created_at) as max_date FROM {table_name}",
                 )
 
                 unique_users = await connection.fetchval(
-                    f"SELECT COUNT(DISTINCT user_id) FROM {table_name} WHERE user_id IS NOT NULL"
+                    f"SELECT COUNT(DISTINCT user_id) FROM {table_name} WHERE user_id IS NOT NULL",
                 )
 
                 return {
@@ -605,12 +611,10 @@ class PostgreSQLStorage(StorageInterface):
                 }
 
         except asyncpg.PostgresError as e:
-            logger.error(f"Failed to get channel stats for {normalized_name}: {e}")
+            logger.error("Failed to get channel stats for %s: %s", normalized_name, e)
             return {}
 
     async def close(self) -> None:
-        """
-        Closes the database connection pool.
-        """
+        """Close the database connection pool."""
         await self._pool.close()
         logger.info("PostgreSQL connection pool closed")

@@ -1,12 +1,11 @@
-"""
-This module provides functions for interacting with the Kick API.
-"""
+"""Functions for interacting with the Kick API."""
 
 import logging
-from typing import Dict, Optional, Union
 from dataclasses import dataclass
+
 import curl_cffi
 from curl_cffi.requests import AsyncSession
+
 from config import KICK_API_V2_URL
 
 logger = logging.getLogger(__name__)
@@ -15,7 +14,7 @@ DEFAULT_TIMEOUT = 30
 
 # one shared session so requests reuse connections and cookies
 # instead of doing a fresh tls handshake every time
-_session: Optional[AsyncSession] = None
+_session: AsyncSession | None = None
 
 
 def _get_session() -> AsyncSession:
@@ -26,9 +25,7 @@ def _get_session() -> AsyncSession:
 
 
 async def close_session() -> None:
-    """
-    Close the shared HTTP session, if one was created.
-    """
+    """Close the shared HTTP session, if one was created."""
     global _session
     if _session is not None:
         await _session.close()
@@ -37,19 +34,16 @@ async def close_session() -> None:
 
 @dataclass(frozen=True)
 class ApiResult:
-    """
-    Result object for API calls.
-    """
+    """Result object for API calls."""
 
     success: bool
-    data: Optional[Union[Dict, int]] = None
-    error: Optional[str] = None
-    status_code: Optional[int] = None
+    data: dict | int | None = None
+    error: str | None = None
+    status_code: int | None = None
 
 
 def _handle_channel_response(response, channel_name: str) -> ApiResult:
-    """
-    Handle channel info API response with all status codes.
+    """Handle channel info API response with all status codes.
 
     Args:
         response: The HTTP response object
@@ -57,6 +51,7 @@ def _handle_channel_response(response, channel_name: str) -> ApiResult:
 
     Returns:
         ApiResult: Result object containing channel data or error information
+
     """
     if response.status_code == 200:
         try:
@@ -101,8 +96,7 @@ def _handle_channel_response(response, channel_name: str) -> ApiResult:
 
 
 def _handle_viewers_response(response, livestream_id: int) -> ApiResult:
-    """
-    Handle viewer count API response with all status codes.
+    """Handle viewer count API response with all status codes.
 
     Args:
         response: The HTTP response object
@@ -110,6 +104,7 @@ def _handle_viewers_response(response, livestream_id: int) -> ApiResult:
 
     Returns:
         ApiResult: Result object containing viewer count or error information
+
     """
     if response.status_code == 200:
         try:
@@ -118,16 +113,17 @@ def _handle_viewers_response(response, livestream_id: int) -> ApiResult:
                 viewers = data[0].get("viewers", 0)
                 logger.debug("Livestream %s has %d viewers", livestream_id, viewers)
                 return ApiResult(success=True, data=viewers, status_code=200)
-            else:
-                logger.info("Livestream %s not found in response", livestream_id)
-                return ApiResult(
-                    success=False,
-                    error=f"Livestream {livestream_id} not found",
-                    status_code=200,
-                )
+            logger.info("Livestream %s not found in response", livestream_id)
+            return ApiResult(
+                success=False,
+                error=f"Livestream {livestream_id} not found",
+                status_code=200,
+            )
         except (curl_cffi.exceptions.JSONDecodeError, IndexError, KeyError) as e:
             logger.error(
-                "Failed to parse viewer count for livestream %s: %s", livestream_id, e
+                "Failed to parse viewer count for livestream %s: %s",
+                livestream_id,
+                e,
             )
             return ApiResult(
                 success=False,
@@ -165,10 +161,10 @@ def _handle_viewers_response(response, livestream_id: int) -> ApiResult:
 
 
 async def get_channel_info(
-    channel_name: str, timeout: int = DEFAULT_TIMEOUT
+    channel_name: str,
+    timeout: int = DEFAULT_TIMEOUT,
 ) -> ApiResult:
-    """
-    Get information about a channel from the Kick API.
+    """Get information about a channel from the Kick API.
 
     Args:
         channel_name (str): The name of the channel to get information about
@@ -176,6 +172,7 @@ async def get_channel_info(
 
     Returns:
         ApiResult: Result object containing channel data or error information
+
     """
     url = KICK_API_V2_URL + channel_name
 

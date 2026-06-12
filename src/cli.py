@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
-"""
-Kick Chat Scraper - Long-running server application with interactive CLI
-"""
+"""Kick Chat Scraper - Long-running server application with interactive CLI."""
 
 import asyncio
 import logging
 import sys
 
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich import box
-
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import NestedCompleter
+from rich import box
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
-from kick_api import get_channel_info, close_session
+from kick_api import close_session, get_channel_info
 from kick_chat_listener import (
-    ChatConnectionManager,
     ChannelNotFoundError,
+    ChatConnectionManager,
     ChatroomIdError,
 )
 from storage.storage_factory import create_storage
@@ -35,22 +32,23 @@ console = Console()
 
 
 class KickChatLogger:
-    """
-    Main scraper application managing multiple channel tasks.
+    """Main scraper application managing multiple channel tasks.
+
     This is the entry point for the CLI.
     """
 
     def __init__(self):
+        """Set up storage, the connection manager, and CLI state."""
         self.storage = create_storage()
         self.manager = ChatConnectionManager(self.storage)
         self.running = True
 
     async def initialize(self) -> bool:
-        """
-        Initialize the scraper.
+        """Initialize the scraper.
 
         Returns:
             bool: True if initialization was successful, False otherwise
+
         """
         if not await self.storage.initialize():
             logger.error("Failed to initialize storage")
@@ -58,11 +56,11 @@ class KickChatLogger:
         return True
 
     async def load_and_start_active_channels(self) -> None:
-        """
-        Load all active channels from database and start scraping them.
+        """Load all active channels from database and start scraping them.
 
         Returns:
             None
+
         """
         active_channels = await self.storage.get_active_channels()
 
@@ -86,11 +84,11 @@ class KickChatLogger:
         await asyncio.gather(*(start_one(name) for name in active_channels))
 
     async def add_channel(self, channel_name: str) -> bool:
-        """
-        Add a new channel and start scraping it.
+        """Add a new channel and start scraping it.
 
         Returns:
             bool: True if channel was added and scraping started successfully, False otherwise
+
         """
         if await self.storage.channel_exists(channel_name):
             logger.warning("Channel '%s' already exists in database", channel_name)
@@ -103,7 +101,9 @@ class KickChatLogger:
 
         if not channel_info.success:
             logger.error(
-                "Channel '%s' not found or error: %s", channel_name, channel_info.error
+                "Channel '%s' not found or error: %s",
+                channel_name,
+                channel_info.error,
             )
             console.print(f"[red]'{channel_name}': {channel_info.error}[/red]")
             return False
@@ -121,17 +121,18 @@ class KickChatLogger:
             return False
 
         logger.info(
-            "Successfully added and started scraping channel '%s'", channel_name
+            "Successfully added and started scraping channel '%s'",
+            channel_name,
         )
         console.print(f"[green]'{channel_name}' added[/green]")
         return True
 
     async def pause_channel(self, channel_name: str) -> bool:
-        """
-        Pause a channel (stop scraping and mark as paused).
+        """Pause a channel (stop scraping and mark as paused).
 
         Returns:
             bool: True if channel was paused successfully, False otherwise
+
         """
         await self.manager.unsubscribe(channel_name)
 
@@ -139,17 +140,16 @@ class KickChatLogger:
             logger.info("Channel '%s' paused successfully", channel_name)
             console.print(f"[yellow]'{channel_name}' paused[/yellow]")
             return True
-        else:
-            logger.error("Failed to pause channel '%s'", channel_name)
-            console.print(f"[red]failed to pause '{channel_name}'[/red]")
-            return False
+        logger.error("Failed to pause channel '%s'", channel_name)
+        console.print(f"[red]failed to pause '{channel_name}'[/red]")
+        return False
 
     async def resume_channel(self, channel_name: str) -> bool:
-        """
-        Resume a paused channel.
+        """Resume a paused channel.
 
         Returns:
             bool: True if channel was resumed successfully, False otherwise
+
         """
         if not await self.storage.resume_channel(channel_name):
             logger.error("Failed to resume channel '%s'", channel_name)
@@ -173,11 +173,11 @@ class KickChatLogger:
         return True
 
     async def list_channels(self) -> None:
-        """
-        List all channels with their status.
+        """List all channels with their status.
 
         Returns:
             None
+
         """
         channels = await self.storage.list_all_channels()
 
@@ -186,7 +186,10 @@ class KickChatLogger:
             return
 
         table = Table(
-            box=box.SIMPLE, show_header=True, header_style="bold dim", padding=(0, 1)
+            box=box.SIMPLE,
+            show_header=True,
+            header_style="bold dim",
+            padding=(0, 1),
         )
         table.add_column("channel", style="bold")
         table.add_column("status")
@@ -207,7 +210,8 @@ class KickChatLogger:
                 else "[yellow]paused[/yellow]"
             )
             scraping = state_display.get(
-                self.manager.channel_state(channel["name"]), "[dim]stopped[/dim]"
+                self.manager.channel_state(channel["name"]),
+                "[dim]stopped[/dim]",
             )
             paused_at = str(channel["paused_at"]) if channel["paused_at"] else ""
             table.add_row(
@@ -221,11 +225,11 @@ class KickChatLogger:
         console.print(table)
 
     async def show_stats(self, channel_name: str) -> None:
-        """
-        Show stats for a channel.
+        """Show stats for a channel.
 
         Returns:
             None
+
         """
         if not await self.storage.channel_exists(channel_name):
             console.print(f"[red]'{channel_name}' not found[/red]")
@@ -246,7 +250,8 @@ class KickChatLogger:
         overview.add_row("unique users", str(stats["unique_users"]))
         if stats["date_range"][0] and stats["date_range"][1]:
             overview.add_row(
-                "date range", f"{stats['date_range'][0]}  —  {stats['date_range'][1]}"
+                "date range",
+                f"{stats['date_range'][0]}  —  {stats['date_range'][1]}",
             )
         console.print(overview)
 
@@ -260,11 +265,11 @@ class KickChatLogger:
             console.print(counts)
 
     async def shutdown(self) -> None:
-        """
-        Gracefully shutdown all scraping tasks.
+        """Gracefully shutdown all scraping tasks.
 
         Returns:
             None
+
         """
         logger.info("Shutting down scraper...")
         self.running = False
@@ -276,7 +281,7 @@ class KickChatLogger:
 
     async def _build_completer(self) -> NestedCompleter:
         channels = await self.storage.get_all_channels()
-        channel_dict = {ch: None for ch in channels}
+        channel_dict = dict.fromkeys(channels)
         return NestedCompleter.from_nested_dict(
             {
                 "add": None,
@@ -286,22 +291,22 @@ class KickChatLogger:
                 "stats": channel_dict,
                 "exit": None,
                 "help": None,
-            }
+            },
         )
 
     async def run_cli(self) -> None:
-        """
-        Run the interactive CLI.
+        """Run the interactive CLI.
 
         Returns:
             None
+
         """
         console.print(
             Panel(
                 "[dim]add  list  pause <channel>  resume <channel>  stats <channel>  exit  help[/dim]",
                 title="[bold]kick chat scraper[/bold]",
                 border_style="dim",
-            )
+            ),
         )
 
         session = PromptSession()
@@ -325,11 +330,11 @@ class KickChatLogger:
                 logger.error("Error in CLI: %s", e)
 
     async def handle_command(self, command: str) -> None:
-        """
-        Handle CLI commands.
+        """Handle CLI commands.
 
         Returns:
             None
+
         """
         if not command:
             return
@@ -380,24 +385,22 @@ class KickChatLogger:
 
         else:
             console.print(
-                "[dim]unknown command — type 'help' for available commands[/dim]"
+                "[dim]unknown command — type 'help' for available commands[/dim]",
             )
 
     async def cleanup_and_exit(self) -> None:
-        """
-        Clean exit message.
+        """Clean exit message.
 
         Returns:
             None
+
         """
         console.print("\n[dim]shutting down...[/dim]")
         self.running = False
 
 
 async def main():
-    """
-    Main entry point for the CLI
-    """
+    """Run the CLI application."""
     scraper = KickChatLogger()
 
     try:

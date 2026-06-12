@@ -1,38 +1,36 @@
-"""
-This module handles the websocket connection to the Kick chat.
+"""Websocket connection and message handling for the Kick chat.
+
 All channels share a single Pusher connection owned by
 ChatConnectionManager, with a queue per channel so one slow
 channel can't stall the others.
-It also handles the messages from the websocket.
 """
 
+import asyncio
+import contextlib
 import json
 import logging
 import random
-import asyncio
-import contextlib
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional
-import websockets
+from typing import Any
+
 import aiofiles
+import websockets
 
-
-from kick_api import get_channel_info
-from storage.storage_interface import StorageInterface
-from kick_event import KickEvent
 from config import (
-    WEBSOCKET_URL,
+    CHANNEL_LOOKUP_CONCURRENCY,
     HANDLED_EVENTS,
     IGNORED_EVENTS,
-    UNHANDLED_MESSAGES_FILE,
-    CHANNEL_LOOKUP_CONCURRENCY,
     PING_INTERVAL_SECONDS,
     PING_TIMEOUT_SECONDS,
     PUSHER_INTERNAL_SUBSCRIPTION_SUCCEEDED_EVENT,
     PUSHER_PING_EVENT,
     PUSHER_PONG_EVENT,
+    UNHANDLED_MESSAGES_FILE,
+    WEBSOCKET_URL,
 )
-
+from kick_api import get_channel_info
+from kick_event import KickEvent
+from storage.storage_interface import StorageInterface
 
 logger = logging.getLogger(__name__)
 
@@ -53,22 +51,16 @@ MAX_BACKOFF_DELAY = 30
 
 
 class ChannelNotFoundError(Exception):
-    """
-    Raised when a channel does not exist on Kick (404). Not retryable.
-    """
+    """Raised when a channel does not exist on Kick (404). Not retryable."""
 
 
 class ChatroomIdError(Exception):
-    """
-    Raised when the chatroom ID for a channel could not be fetched. Retryable.
-    """
+    """Raised when the chatroom ID for a channel could not be fetched. Retryable."""
 
 
 @dataclass
 class ChannelSub:
-    """
-    Bookkeeping for one channel subscription on the shared connection.
-    """
+    """Bookkeeping for one channel subscription on the shared connection."""
 
     channel_name: str
     chatroom_id: int
@@ -76,13 +68,12 @@ class ChannelSub:
     queue: asyncio.Queue
     state: str = PENDING
     ack: asyncio.Event = field(default_factory=asyncio.Event)
-    consumer_task: Optional[asyncio.Task] = None
-    ack_task: Optional[asyncio.Task] = None
+    consumer_task: asyncio.Task | None = None
+    ack_task: asyncio.Task | None = None
 
 
 class ChatConnectionManager:
-    """
-    Owns the single shared Pusher websocket and all channel subscriptions.
+    """Owns the single shared Pusher websocket and all channel subscriptions.
 
     Each subscribed channel gets a pusher:subscribe frame on the shared
     socket, a queue for its incoming messages, and a consumer task that
@@ -91,21 +82,26 @@ class ChatConnectionManager:
     """
 
     def __init__(self, storage: StorageInterface):
+        """Wire the manager to its storage backend.
+
+        Args:
+            storage (StorageInterface): Storage for events and cached chatroom IDs
+
+        """
         self.storage = storage
-        self._channels: Dict[str, ChannelSub] = {}  # kick name -> sub
-        self._routes: Dict[str, str] = {}  # pusher channel -> kick name
+        self._channels: dict[str, ChannelSub] = {}  # kick name -> sub
+        self._routes: dict[str, str] = {}  # pusher channel -> kick name
         self._ws = None
         self._connected = False
         self._closing = False
-        self._runner: Optional[asyncio.Task] = None
+        self._runner: asyncio.Task | None = None
         # every chatroom-id lookup goes through this cap, otherwise a mass
         # ack-timeout after a reconnect could burst thousands of concurrent
         # requests at the kick api
         self._lookup_sem = asyncio.Semaphore(CHANNEL_LOOKUP_CONCURRENCY)
 
     async def subscribe(self, channel_name: str, refresh: bool = False) -> bool:
-        """
-        Subscribe a channel on the shared connection and start logging it.
+        """Subscribe a channel on the shared connection and start logging it.
 
         Args:
             channel_name (str): The name of the channel to subscribe
@@ -117,6 +113,7 @@ class ChatConnectionManager:
         Raises:
             ChannelNotFoundError: If the channel does not exist on Kick (404).
             ChatroomIdError: If the chatroom ID could not be fetched (retryable).
+
         """
         sub = self._channels.get(channel_name)
         if sub is not None:
@@ -157,14 +154,14 @@ class ChatConnectionManager:
         return True
 
     async def unsubscribe(self, channel_name: str) -> bool:
-        """
-        Unsubscribe a channel, draining its queue before stopping the consumer.
+        """Unsubscribe a channel, draining its queue before stopping the consumer.
 
         Args:
             channel_name (str): The name of the channel to unsubscribe
 
         Returns:
             bool: True if the channel was subscribed, False otherwise
+
         """
         sub = self._channels.pop(channel_name, None)
         if sub is None:
@@ -191,32 +188,34 @@ class ChatConnectionManager:
         logger.info("Unsubscribed from channel %s", channel_name)
         return True
 
-    def channel_state(self, channel_name: str) -> Optional[str]:
-        """
-        Get the subscription state of a channel.
+    def channel_state(self, channel_name: str) -> str | None:
+        """Get the subscription state of a channel.
 
         Args:
             channel_name (str): The name of the channel
 
         Returns:
             Optional[str]: PENDING, SUBSCRIBED or ERRORED, None if not subscribed
+
         """
         sub = self._channels.get(channel_name)
         return sub.state if sub is not None else None
 
     def active_count(self) -> int:
-        """
+        """Return the number of channels registered on the connection.
+
         Returns:
             int: Number of channels registered on the connection
+
         """
         return len(self._channels)
 
     async def close(self) -> None:
-        """
-        Shut down the connection and all consumers, draining queues first.
+        """Shut down the connection and all consumers, draining queues first.
 
         Returns:
             None
+
         """
         self._closing = True
         if self._runner is not None:
@@ -238,19 +237,20 @@ class ChatConnectionManager:
             self._runner = asyncio.create_task(self._run())
 
     async def _run(self) -> None:
-        """
-        Connection loop: connect, resubscribe everything, read frames until
-        the connection drops, back off, repeat. Never gives up, only close()
-        stops it.
+        """Run the connection loop.
+
+        Connect, resubscribe everything, read frames until the connection
+        drops, back off, repeat. Never gives up, only close() stops it.
 
         Returns:
             None
+
         """
         connection_retries = 0
         other_retries = 0
 
         while not self._closing:
-            error: Optional[BaseException] = None
+            error: BaseException | None = None
             try:
                 async with websockets.connect(
                     WEBSOCKET_URL,
@@ -296,7 +296,8 @@ class ChatConnectionManager:
             else:
                 other_retries += 1
                 delay = min(
-                    BASE_DELAY * (2 ** min(other_retries - 1, 8)), MAX_BACKOFF_DELAY
+                    BASE_DELAY * (2 ** min(other_retries - 1, 8)),
+                    MAX_BACKOFF_DELAY,
                 )
                 attempt = other_retries
             # jitter so retries don't land in lockstep
@@ -323,16 +324,18 @@ class ChatConnectionManager:
             sub.ack_task = asyncio.create_task(self._subscribe_with_ack(sub))
 
     async def _subscribe_with_ack(self, sub: ChannelSub) -> None:
-        """
-        Send the subscribe frame and wait for pusher's ack, re-fetching the
-        chatroom ID on timeout in case it changed. Only sends frames, never
-        touches the connection itself: reconnects are the runner's job.
+        """Send the subscribe frame and wait for pusher's ack.
+
+        Re-fetches the chatroom ID on timeout in case it changed. Only
+        sends frames, never touches the connection itself: reconnects are
+        the runner's job.
 
         Args:
             sub (ChannelSub): The channel subscription to subscribe
 
         Returns:
             None
+
         """
         for _ in range(1 + SUBSCRIBE_ACK_RETRIES):
             ws = self._ws
@@ -370,7 +373,9 @@ class ChatConnectionManager:
                 return
             except ChatroomIdError as e:
                 logger.warning(
-                    "Could not refresh chatroom ID for %s: %s", sub.channel_name, e
+                    "Could not refresh chatroom ID for %s: %s",
+                    sub.channel_name,
+                    e,
                 )
                 continue
 
@@ -395,16 +400,17 @@ class ChatConnectionManager:
         sub.state = ERRORED
 
     async def _handle_frame(self, raw: str) -> None:
-        """
-        Parse one frame from the shared socket and route it to the right
-        channel's queue. Connection-level frames and post-unsubscribe
-        stragglers keep the old unhandled-message logging behavior.
+        """Parse one frame and route it to the right channel's queue.
+
+        Connection-level frames and post-unsubscribe stragglers keep the
+        old unhandled-message logging behavior.
 
         Args:
             raw (str): The raw frame from the websocket
 
         Returns:
             None
+
         """
         try:
             message = json.loads(raw)
@@ -435,7 +441,9 @@ class ChatConnectionManager:
                 sub.state = SUBSCRIBED
                 sub.ack.set()
                 logger.info(
-                    "Subscribed to chatroom %s (%s)", sub.chatroom_id, channel_name
+                    "Subscribed to chatroom %s (%s)",
+                    sub.chatroom_id,
+                    channel_name,
                 )
             return
 
@@ -454,14 +462,14 @@ class ChatConnectionManager:
             logger.warning("Queue full for %s, dropping message", channel_name)
 
     async def _consume(self, sub: ChannelSub) -> None:
-        """
-        Drain one channel's queue: parse each message and store it.
+        """Drain one channel's queue: parse each message and store it.
 
         Args:
             sub (ChannelSub): The channel subscription to consume
 
         Returns:
             None
+
         """
         while True:
             message = await sub.queue.get()
@@ -469,7 +477,8 @@ class ChatConnectionManager:
                 kick_event = await handle_websocket_message(message)
                 if kick_event:
                     success = await self.storage.store_event(
-                        sub.channel_name, kick_event
+                        sub.channel_name,
+                        kick_event,
                     )
                     if not success:
                         logger.error("Failed to store event for %s", sub.channel_name)
@@ -496,8 +505,7 @@ class ChatConnectionManager:
 
 
 async def get_chatroom_id(channel_name: str) -> int:
-    """
-    Fetches and returns the chatroom ID for a given channel name.
+    """Fetch and return the chatroom ID for a given channel name.
 
     Args:
         channel_name (str): The name of the channel to get the chatroom ID for
@@ -508,6 +516,7 @@ async def get_chatroom_id(channel_name: str) -> int:
     Raises:
         ChannelNotFoundError: If the channel does not exist on Kick (404).
         ChatroomIdError: If the lookup failed for any other reason (retryable).
+
     """
     channel_info_result = await get_channel_info(channel_name)
     if not channel_info_result.success or not channel_info_result.data:
@@ -519,7 +528,7 @@ async def get_chatroom_id(channel_name: str) -> int:
         if channel_info_result.status_code == 404:
             raise ChannelNotFoundError(f"Channel '{channel_name}' not found on Kick")
         raise ChatroomIdError(
-            f"Failed to get channel info for '{channel_name}': {channel_info_result.error}"
+            f"Failed to get channel info for '{channel_name}': {channel_info_result.error}",
         )
 
     chatroom_id = None
@@ -531,9 +540,9 @@ async def get_chatroom_id(channel_name: str) -> int:
     return chatroom_id
 
 
-async def parse_event(message: Dict[str, Any]) -> KickEvent:
-    """
-    Parses all events from the websocket.
+async def parse_event(message: dict[str, Any]) -> KickEvent:
+    """Parse all events from the websocket.
+
     Supports chat messages, subscriptions, bans, deletions, pins, and sent messages.
 
     Args:
@@ -541,6 +550,7 @@ async def parse_event(message: Dict[str, Any]) -> KickEvent:
 
     Returns:
         KickEvent: Parsed event data
+
     """
     event_type = message.get("event")
     if not isinstance(event_type, str):
@@ -555,27 +565,28 @@ async def parse_event(message: Dict[str, Any]) -> KickEvent:
     return kick_event
 
 
-async def _log_unhandled_message(message: Dict[str, Any]) -> None:
-    """
-    Logs unhandled messages to a file for analysis.
+async def _log_unhandled_message(message: dict[str, Any]) -> None:
+    """Log unhandled messages to a file for analysis.
 
     Args:
         message (Dict[str, Any]): The unhandled message from the WebSocket
+
     """
     async with aiofiles.open(UNHANDLED_MESSAGES_FILE, "a", encoding="utf-8") as f:
         await f.write(json.dumps(message) + "\n")
 
 
-async def handle_websocket_message(message: Dict[str, Any]) -> Optional[KickEvent]:
-    """
-    Handles messages from the Kick WebSocket, parsing handled events
-    and logging unhandled ones.
+async def handle_websocket_message(message: dict[str, Any]) -> KickEvent | None:
+    """Handle a message from the Kick WebSocket.
+
+    Parses handled events and logs unhandled ones.
 
     Args:
         message (Dict[str, Any]): The message from the Kick WebSocket
 
     Returns:
         Optional[KickEvent]: The parsed event if it is a handled event type, otherwise None
+
     """
     event_type = message.get("event")
 

@@ -1,6 +1,4 @@
-"""
-Configuration settings for the Kick chat logger.
-"""
+"""Configuration settings for the Kick chat logger."""
 
 import os
 

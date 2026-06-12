@@ -1,8 +1,8 @@
-import logging
-from typing import Optional
-from datetime import datetime, UTC
+"""Helpers for channel-name sanitization and timestamp normalization."""
 
+import logging
 import re
+from datetime import UTC, datetime
 
 from config import CHANNEL_TABLE_PREFIX
 
@@ -10,8 +10,8 @@ logger = logging.getLogger(__name__)
 
 
 def sanitize_channel_name(name: str) -> str:
-    """
-    Normalizes channel names for consistent storage.
+    """Normalize channel names for consistent storage.
+
     Converts to lowercase and strips whitespace.
 
     Args:
@@ -19,6 +19,7 @@ def sanitize_channel_name(name: str) -> str:
 
     Returns:
         str: The normalized channel name
+
     """
     # Convert to lowercase for consistency (xQc = xqc), but keep the name
     # otherwise untouched: kick slugs can contain dashes, and mangling them
@@ -27,14 +28,14 @@ def sanitize_channel_name(name: str) -> str:
 
 
 def get_channel_table_name(channel_name: str) -> str:
-    """
-    Gets the table name for a channel.
+    """Get the table name for a channel.
 
     Args:
         channel_name (str): The name of the channel
 
     Returns:
         str: The table name for the channel, prefixed with the CHANNEL_TABLE_PREFIX constant
+
     """
     normalized = sanitize_channel_name(channel_name)
 
@@ -46,9 +47,9 @@ def get_channel_table_name(channel_name: str) -> str:
     return f"{CHANNEL_TABLE_PREFIX}{sanitized}"
 
 
-def normalize_timestamp(timestamp) -> Optional[str]:
-    """
-    Normalizes timestamps to ISO format with UTC timezone.
+def normalize_timestamp(timestamp) -> str | None:
+    """Normalize timestamps to ISO format with UTC timezone.
+
     Handles datetime objects, string timestamps, and unix timestamps.
 
     Args:
@@ -56,6 +57,7 @@ def normalize_timestamp(timestamp) -> Optional[str]:
 
     Returns:
         Optional[str]: The normalized timestamp, or None if the timestamp is invalid
+
     """
     if not timestamp:
         return None
@@ -67,14 +69,13 @@ def normalize_timestamp(timestamp) -> Optional[str]:
             if timestamp.tzinfo is None:
                 timestamp = timestamp.replace(tzinfo=UTC)
             return timestamp.astimezone(UTC).isoformat()
-        elif isinstance(timestamp, (int, float)):
+        if isinstance(timestamp, (int, float)):
             return datetime.fromtimestamp(timestamp, UTC).isoformat()
-        elif isinstance(timestamp, str):
+        if isinstance(timestamp, str):
             # already a string, assume it's properly formatted
             return timestamp
-        else:
-            logger.warning("Unknown timestamp format: %s", type(timestamp))
-            return None
+        logger.warning("Unknown timestamp format: %s", type(timestamp))
+        return None
     except (ValueError, TypeError) as e:
         logger.warning("Failed to normalize timestamp %s: %s", timestamp, e)
         return None
