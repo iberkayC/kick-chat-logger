@@ -153,6 +153,23 @@ class ChatConnectionManager:
 
         return True
 
+    async def lookup_chatroom_id(self, channel_name: str) -> int:
+        """Look up a chatroom ID fresh, going through the shared lookup cap.
+
+        Args:
+            channel_name (str): The name of the channel to look up
+
+        Returns:
+            int: The chatroom ID for the channel
+
+        Raises:
+            ChannelNotFoundError: If the channel does not exist on Kick (404).
+            ChatroomIdError: If the lookup failed for any other reason (retryable).
+
+        """
+        async with self._lookup_sem:
+            return await get_chatroom_id(channel_name)
+
     async def unsubscribe(self, channel_name: str) -> bool:
         """Unsubscribe a channel, draining its queue before stopping the consumer.
 
@@ -482,9 +499,9 @@ class ChatConnectionManager:
                     )
                     if not success:
                         logger.error("Failed to store event for %s", sub.channel_name)
-            except Exception as e:
+            except Exception:
                 # one bad message must not kill the consumer or wedge drains
-                logger.error("Error handling message for %s: %s", sub.channel_name, e)
+                logger.exception("Error handling message for %s", sub.channel_name)
             finally:
                 sub.queue.task_done()
 

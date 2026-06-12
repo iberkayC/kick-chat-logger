@@ -2,8 +2,6 @@
 
 A Python-based Kick.com chat logger. Collects chat messages, user subscriptions, timeouts, bans, unbans, message deletions, pinned message events, etc. asynchronously from multiple channels and stores them in a database backend (SQLite or PostgreSQL).
 
-I mostly created this for fun to run via SSH on my small Linux server in a tmux session. Educational purposes only. 
-
 ## Features
 
 The tool connects to Kick.com's WebSocket to log live chat events in real time. The system records almost all events, including chat messages, user subscriptions, bans and unbans, message deletions, pinned messages, stream hosting, and chatroom setting changes. All data is stored in a database backend (SQLite or PostgreSQL), with each channel having its own table. There is a command-line interface for adding, pausing, resuming, and managing channels, as well as viewing statistics. The program is designed to handle errors automatically, with built-in reconnection and retry logic to keep it running smoothly. It also uses curl-cffi to get around Cloudflare protection and avoid detection.
@@ -60,6 +58,7 @@ python cli.py
 
 ### Available Commands
 - `add <channel_name>` - Add and start monitoring a channel
+- `bulkadd <file>` - Add and start monitoring every channel listed in a file (one name per line, blank lines and `#` comments ignored)
 - `pause <channel_name>` - Temporarily stop monitoring a channel
 - `resume <channel_name>` - Resume monitoring a paused channel
 - `list` - Show all channels and their status
@@ -97,7 +96,6 @@ Each channel gets its own table (prefixed with `kickchat_` on default) containin
 
 ## Known Issues
 
-- The logging is not the best, gets the job done.
 - If a channel gets banned or renamed while being logged, Pusher may still accept the subscription, so `list` can show it as running while it logs nothing. There is no automatic staleness detection, check `stats` once in a while and `resume <channel>` anything suspicious to refresh it.
 - Channels that fail to subscribe (bans, renames, lookup errors) show as errored in `list` and stay that way until manually retried with `resume <channel>`.
 

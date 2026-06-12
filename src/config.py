@@ -7,6 +7,13 @@ from dotenv import load_dotenv
 # loads variables from a .env file in the project root, if there is one
 load_dotenv()
 
+# cli.py
+# level for kick_scraper.log: DEBUG, INFO, WARNING or ERROR
+LOG_LEVEL = "INFO"
+# kick_scraper.log rolls over at this size, keeping this many old files
+LOG_MAX_BYTES = 10 * 1024 * 1024
+LOG_BACKUP_COUNT = 5
+
 # kick_chat_listener.py
 # WebSocket configuration
 WEBSOCKET_URL = (

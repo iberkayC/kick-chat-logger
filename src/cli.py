@@ -4,15 +4,19 @@
 import asyncio
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 
+import aiofiles
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import NestedCompleter
+from prompt_toolkit.completion import NestedCompleter, PathCompleter
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
 from rich.table import Table
 
-from kick_api import close_session, get_channel_info
+from config import LOG_BACKUP_COUNT, LOG_LEVEL, LOG_MAX_BYTES
+from kick_api import close_session
 from kick_chat_listener import (
     ChannelNotFoundError,
     ChatConnectionManager,
@@ -21,10 +25,15 @@ from kick_chat_listener import (
 from storage.storage_factory import create_storage
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    filename="kick_scraper.log",
-    filemode="a",
+    level=LOG_LEVEL,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        RotatingFileHandler(
+            "kick_scraper.log",
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+        ),
+    ],
 )
 
 logger = logging.getLogger(__name__)
@@ -97,27 +106,11 @@ class KickChatLogger:
 
         console.print(f"[dim]checking '{channel_name}'...[/dim]")
         logger.info("Checking if channel '%s' exists on Kick...", channel_name)
-        channel_info = await get_channel_info(channel_name)
+        error = await self._add_and_subscribe(channel_name)
 
-        if not channel_info.success:
-            logger.error(
-                "Channel '%s' not found or error: %s",
-                channel_name,
-                channel_info.error,
-            )
-            console.print(f"[red]'{channel_name}': {channel_info.error}[/red]")
-            return False
-
-        if not await self.storage.add_channel(channel_name):
-            logger.error("Failed to add channel '%s' to database", channel_name)
-            console.print(f"[red]failed to add '{channel_name}' to database[/red]")
-            return False
-
-        try:
-            await self.manager.subscribe(channel_name)
-        except (ChannelNotFoundError, ChatroomIdError) as e:
-            logger.error("Failed to start scraping channel '%s': %s", channel_name, e)
-            console.print(f"[red]failed to start scraping '{channel_name}'[/red]")
+        if error is not None:
+            logger.error("Failed to add channel '%s': %s", channel_name, error)
+            console.print(f"[red]'{channel_name}': {error}[/red]")
             return False
 
         logger.info(
@@ -126,6 +119,119 @@ class KickChatLogger:
         )
         console.print(f"[green]'{channel_name}' added[/green]")
         return True
+
+    async def _add_and_subscribe(self, channel_name: str) -> str | None:
+        """Validate, store, and subscribe one new channel.
+
+        Returns:
+            Optional[str]: An error message, or None on success
+
+        """
+        try:
+            # look up before writing anything so a dead name leaves no row;
+            # subscribe then reads the id we cache here instead of re-fetching
+            chatroom_id = await self.manager.lookup_chatroom_id(channel_name)
+        except (ChannelNotFoundError, ChatroomIdError) as e:
+            return str(e)
+
+        if not await self.storage.add_channel(channel_name):
+            return "failed to add to database"
+
+        await self.storage.set_chatroom_id(channel_name, chatroom_id)
+
+        try:
+            await self.manager.subscribe(channel_name)
+        except (ChannelNotFoundError, ChatroomIdError) as e:
+            return str(e)
+
+        return None
+
+    async def bulk_add_channels(self, file_path: str) -> None:
+        """Add and start scraping every channel listed in a file.
+
+        One channel name per line; blank lines and lines starting with #
+        are ignored, duplicates are added once. Each name is validated
+        against the Kick API before anything is written to the database,
+        so failed names leave nothing behind and the same file can be
+        re-run to retry them.
+
+        Returns:
+            None
+
+        """
+        try:
+            async with aiofiles.open(file_path, encoding="utf-8") as f:
+                lines = await f.readlines()
+        except OSError as e:
+            console.print(f"[red]cannot read '{file_path}': {e}[/red]")
+            return
+
+        names = []
+        seen = set()
+        for line in lines:
+            name = line.strip()
+            if not name or name.startswith("#"):
+                continue
+            if name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            names.append(name)
+
+        if not names:
+            console.print(f"[dim]no channel names in '{file_path}'[/dim]")
+            return
+
+        added = []
+        skipped = []
+        failed = []
+
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task("adding channels", total=len(names))
+
+            async def add_one(channel_name: str) -> None:
+                try:
+                    if await self.storage.channel_exists(channel_name):
+                        skipped.append(channel_name)
+                        return
+                    error = await self._add_and_subscribe(channel_name)
+                    if error is not None:
+                        failed.append((channel_name, error))
+                    else:
+                        added.append(channel_name)
+                finally:
+                    progress.advance(task)
+
+            await asyncio.gather(*(add_one(name) for name in names))
+
+        logger.info(
+            "Bulk add from %s: %d added, %d skipped, %d failed",
+            file_path,
+            len(added),
+            len(skipped),
+            len(failed),
+        )
+        for channel_name, error in failed:
+            logger.error("Bulk add failed for '%s': %s", channel_name, error)
+
+        console.print(
+            f"[green]added {len(added)}[/green]  "
+            f"[dim]skipped {len(skipped)} (already exist)[/dim]  "
+            f"[{'red' if failed else 'dim'}]failed {len(failed)}[/]",
+        )
+        max_shown = 20
+        for channel_name, error in failed[:max_shown]:
+            console.print(f"[red]  {channel_name}: {error}[/red]")
+        if len(failed) > max_shown:
+            console.print(
+                f"[red]  ... and {len(failed) - max_shown} more, "
+                "see kick_scraper.log[/red]",
+            )
 
     async def pause_channel(self, channel_name: str) -> bool:
         """Pause a channel (stop scraping and mark as paused).
@@ -285,6 +391,7 @@ class KickChatLogger:
         return NestedCompleter.from_nested_dict(
             {
                 "add": None,
+                "bulkadd": PathCompleter(),
                 "list": None,
                 "pause": channel_dict,
                 "resume": channel_dict,
@@ -303,7 +410,8 @@ class KickChatLogger:
         """
         console.print(
             Panel(
-                "[dim]add  list  pause <channel>  resume <channel>  stats <channel>  exit  help[/dim]",
+                "[dim]add  bulkadd <file>  list  pause <channel>  "
+                "resume <channel>  stats <channel>  exit  help[/dim]",
                 title="[bold]kick chat scraper[/bold]",
                 border_style="dim",
             ),
@@ -326,8 +434,8 @@ class KickChatLogger:
             except asyncio.CancelledError:
                 await self.cleanup_and_exit()
                 break
-            except Exception as e:
-                logger.error("Error in CLI: %s", e)
+            except Exception:
+                logger.exception("Error in CLI")
 
     async def handle_command(self, command: str) -> None:
         """Handle CLI commands.
@@ -348,6 +456,10 @@ class KickChatLogger:
         elif cmd == "add" and len(parts) == 2:
             channel_name = parts[1]
             await self.add_channel(channel_name)
+
+        # maxsplit so file names with spaces survive
+        elif cmd == "bulkadd" and len(parts) >= 2:
+            await self.bulk_add_channels(command.split(maxsplit=1)[1])
 
         elif cmd == "list":
             await self.list_channels()
@@ -375,6 +487,10 @@ class KickChatLogger:
             table.add_column(style="bold")
             table.add_column(style="dim")
             table.add_row("add <channel>", "start scraping a channel")
+            table.add_row(
+                "bulkadd <file>",
+                "add channels from a file, one name per line",
+            )
             table.add_row("list", "list all channels and their status")
             table.add_row("pause <channel>", "pause scraping for a channel")
             table.add_row("resume", "restart active channels")
@@ -412,8 +528,8 @@ async def main():
 
         await scraper.run_cli()
 
-    except Exception as e:
-        logger.error("Unexpected error: %s", e)
+    except Exception:
+        logger.exception("Unexpected error")
         return 1
 
     finally:
