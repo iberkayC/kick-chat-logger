@@ -1,4 +1,4 @@
-"""Helpers for channel-name sanitization and timestamp normalization."""
+"""Helpers for channel-name sanitization and timestamp parsing."""
 
 import logging
 import re
@@ -47,16 +47,17 @@ def get_channel_table_name(channel_name: str) -> str:
     return f"{CHANNEL_TABLE_PREFIX}{sanitized}"
 
 
-def normalize_timestamp(timestamp) -> str | None:
-    """Normalize timestamps to ISO format with UTC timezone.
+def parse_timestamp(timestamp) -> datetime | None:
+    """Parse a timestamp into an aware UTC datetime.
 
-    Handles datetime objects, string timestamps, and unix timestamps.
+    Handles datetime objects, ISO 8601 strings (including a Z suffix),
+    and unix timestamps. Naive inputs are assumed UTC.
 
     Args:
-        timestamp (datetime, str, int, float): The timestamp to normalize
+        timestamp (datetime, str, int, float): The timestamp to parse
 
     Returns:
-        Optional[str]: The normalized timestamp, or None if the timestamp is invalid
+        Optional[datetime]: The parsed datetime, or None if the timestamp is invalid
 
     """
     if not timestamp:
@@ -64,18 +65,18 @@ def normalize_timestamp(timestamp) -> str | None:
 
     try:
         if isinstance(timestamp, datetime):
-            # Handle datetime objects directly, naive ones are assumed UTC
-            # isoformat() already includes +00:00, so no "Z" suffix is needed
-            if timestamp.tzinfo is None:
-                timestamp = timestamp.replace(tzinfo=UTC)
-            return timestamp.astimezone(UTC).isoformat()
-        if isinstance(timestamp, (int, float)):
-            return datetime.fromtimestamp(timestamp, UTC).isoformat()
-        if isinstance(timestamp, str):
-            # already a string, assume it's properly formatted
-            return timestamp
-        logger.warning("Unknown timestamp format: %s", type(timestamp))
-        return None
+            parsed = timestamp
+        elif isinstance(timestamp, (int, float)):
+            return datetime.fromtimestamp(timestamp, UTC)
+        elif isinstance(timestamp, str):
+            parsed = datetime.fromisoformat(timestamp)
+        else:
+            logger.warning("Unknown timestamp format: %s", type(timestamp))
+            return None
     except (ValueError, TypeError) as e:
-        logger.warning("Failed to normalize timestamp %s: %s", timestamp, e)
+        logger.warning("Failed to parse timestamp %s: %s", timestamp, e)
         return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)

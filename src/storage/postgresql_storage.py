@@ -4,6 +4,7 @@ Manages PostgreSQL database operations for storing chat messages,
 subscriptions, bans, and other events from Kick chat streams.
 """
 
+import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -89,6 +90,7 @@ class PostgreSQLStorage(StorageInterface):
                 min_size=self.min_connections,
                 max_size=self.max_connections,
                 command_timeout=self.command_timeout,
+                init=self._init_connection,
             )
 
             async with self._pool.acquire() as connection:
@@ -100,6 +102,24 @@ class PostgreSQLStorage(StorageInterface):
         except (asyncpg.PostgresError, OSError) as e:
             logger.error("Failed to initialize PostgreSQL database: %s", e)
             return False
+
+    @staticmethod
+    async def _init_connection(connection: asyncpg.Connection) -> None:
+        """Register codecs so JSONB columns accept and return plain dicts.
+
+        Args:
+            connection (asyncpg.Connection): A fresh pool connection
+
+        Returns:
+            None
+
+        """
+        await connection.set_type_codec(
+            "jsonb",
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema="pg_catalog",
+        )
 
     async def _create_channels_table(self, connection: asyncpg.Connection) -> bool:
         """Create the channels table if it doesn't exist.
@@ -157,9 +177,9 @@ class PostgreSQLStorage(StorageInterface):
             id SERIAL PRIMARY KEY,
             event_type TEXT NOT NULL,
             event_id TEXT,
-            chatroom_id TEXT,
+            chatroom_id BIGINT,
             timestamp TIMESTAMPTZ,
-            user_id TEXT,
+            user_id BIGINT,
             username TEXT,
             content TEXT,
             sender_data JSONB,
@@ -317,7 +337,7 @@ class PostgreSQLStorage(StorageInterface):
         table_name = get_channel_table_name(normalized_name)
         created_at_db = datetime.now(UTC)
 
-        prepared_data = prepare_event_data(event)
+        ev = prepare_event_data(event)
 
         try:
             async with self._pool.acquire() as connection:
@@ -328,53 +348,25 @@ class PostgreSQLStorage(StorageInterface):
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 """
 
-                sender_data = prepared_data[7]
-                metadata = prepared_data[8]
-                raw_payload = prepared_data[9]
-
-                timestamp = None
-                if prepared_data[3]:
-                    try:
-                        # Have to replace Z with +00:00, temporary solution for now
-                        timestamp = datetime.fromisoformat(
-                            prepared_data[3].replace("Z", "+00:00"),
-                        )
-                    except ValueError:
-                        logger.warning("Invalid timestamp format: %s", prepared_data[3])
-
-                if not timestamp:
-                    timestamp = created_at_db
-
-                # keeping these as strings for now
-                chatroom_id = (
-                    str(prepared_data[2]) if prepared_data[2] is not None else None
-                )
-                user_id = (
-                    str(prepared_data[4]) if prepared_data[4] is not None else None
-                )
-                event_id = (
-                    str(prepared_data[1]) if prepared_data[1] is not None else None
-                )
-
                 await connection.execute(
                     insert_sql,
-                    prepared_data[0],
-                    event_id,
-                    chatroom_id,
-                    timestamp,
-                    user_id,
-                    prepared_data[5],
-                    prepared_data[6],
-                    sender_data,
-                    metadata,
-                    raw_payload,
+                    ev.event_type,
+                    ev.event_id,
+                    ev.chatroom_id,
+                    ev.timestamp,
+                    ev.user_id,
+                    ev.username,
+                    ev.content,
+                    ev.sender_data,
+                    ev.metadata,
+                    ev.raw_payload,
                     created_at_db,
                 )
 
             logger.debug(
                 "Stored event for channel %s: %s",
                 normalized_name,
-                prepared_data[0],
+                ev.event_type,
             )
             return True
 

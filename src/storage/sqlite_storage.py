@@ -8,6 +8,7 @@ All operations share one long-lived connection, serialized by a lock.
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import sqlite3
@@ -22,7 +23,6 @@ from storage.storage_interface import StorageInterface
 from utils.data_preparation import prepare_event_data
 from utils.sanitize_validate import (
     get_channel_table_name,
-    normalize_timestamp,
     sanitize_channel_name,
 )
 
@@ -249,7 +249,7 @@ class SQLiteStorage(StorageInterface):
 
         """
         normalized_name = sanitize_channel_name(channel_name)
-        timestamp = normalize_timestamp(datetime.now(UTC))
+        timestamp = datetime.now(UTC).isoformat()
 
         try:
             async with self._lock:
@@ -389,10 +389,22 @@ class SQLiteStorage(StorageInterface):
             return False
 
         table_name = get_channel_table_name(normalized_name)
-        created_at_db = normalize_timestamp(datetime.now(UTC))
+        created_at_db = datetime.now(UTC).isoformat()
 
-        # Prepare all event data for insertion
-        prepared_data = prepare_event_data(kick_event)
+        ev = prepare_event_data(kick_event)
+        row = (
+            ev.event_type,
+            ev.event_id,
+            ev.chatroom_id,
+            ev.timestamp.isoformat() if ev.timestamp else None,
+            ev.user_id,
+            ev.username,
+            ev.content,
+            json.dumps(ev.sender_data) if ev.sender_data is not None else None,
+            json.dumps(ev.metadata) if ev.metadata is not None else None,
+            json.dumps(ev.raw_payload),
+            created_at_db,
+        )
 
         insert_sql = f"""
         INSERT INTO {table_name} (
@@ -403,10 +415,7 @@ class SQLiteStorage(StorageInterface):
 
         try:
             async with self._lock:
-                await self._connection.execute(
-                    insert_sql,
-                    prepared_data + (created_at_db,),
-                )
+                await self._connection.execute(insert_sql, row)
                 self._pending += 1
                 if self._pending >= COMMIT_BATCH_SIZE:
                     await self._commit()
@@ -416,7 +425,7 @@ class SQLiteStorage(StorageInterface):
             logger.debug(
                 "Stored event for channel %s: %s",
                 normalized_name,
-                prepared_data[0],
+                ev.event_type,
             )
             return True
 
@@ -440,7 +449,7 @@ class SQLiteStorage(StorageInterface):
 
         try:
             async with self._lock:
-                timestamp = normalize_timestamp(datetime.now(UTC))
+                timestamp = datetime.now(UTC).isoformat()
                 await self._connection.execute(
                     "UPDATE channels SET paused = ?, paused_at = ? WHERE name = ?",
                     (True, timestamp, normalized_name),

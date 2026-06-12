@@ -1,6 +1,7 @@
-"""Turn parsed Kick events into rows ready for database insertion."""
+"""Turn parsed Kick events into typed PreparedEvent objects for storage."""
 
-import json
+from dataclasses import dataclass
+from datetime import datetime
 
 from config import (
     CHAT_MESSAGE_EVENT,
@@ -28,17 +29,48 @@ from config import (
     USER_UNBANNED_TEMPLATE,
 )
 from kick_event import KickEvent
-from utils.sanitize_validate import normalize_timestamp
+from utils.sanitize_validate import parse_timestamp
 
 
-def prepare_event_data(kick_event: KickEvent) -> tuple:
+@dataclass(frozen=True)
+class PreparedEvent:
+    """One event in storage-ready form, with native Python types.
+
+    Backends serialize these fields to their own column types; nothing
+    here is pre-stringified.
+    """
+
+    event_type: str
+    event_id: str | None  # uuid for chat messages, stringified int elsewhere
+    chatroom_id: int | None
+    timestamp: datetime | None
+    user_id: int | None
+    username: str | None
+    content: str | None
+    sender_data: dict | None
+    metadata: dict | None
+    raw_payload: dict
+
+
+def _as_str(value) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _as_int(value) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (ValueError, TypeError):
+        return None
+
+
+def prepare_event_data(kick_event: KickEvent) -> PreparedEvent:
     """Prepare event data for database insertion.
 
     Args:
         kick_event (KickEvent): The KickEvent dataclass instance
 
     Returns:
-        Tuple: Prepared data for database insertion
+        PreparedEvent: Typed event data ready for a storage backend
 
     """
     event_data_dict = kick_event.data
@@ -62,7 +94,10 @@ def prepare_event_data(kick_event: KickEvent) -> tuple:
     return prepare_method(event_data_dict, event_type)
 
 
-def _prepare_chat_message_data(event_data_dict: dict, event_type: str) -> tuple:
+def _prepare_chat_message_data(
+    event_data_dict: dict,
+    event_type: str,
+) -> PreparedEvent:
     """Prepare chat message event data for database insertion.
 
     Args:
@@ -70,38 +105,29 @@ def _prepare_chat_message_data(event_data_dict: dict, event_type: str) -> tuple:
         event_type (str): The event type
 
     Returns:
-        Tuple: Prepared data for database insertion
+        PreparedEvent: Typed event data ready for a storage backend
 
     """
     sender_dict = event_data_dict.get("sender", {})
 
-    sender_data_str = (
-        json.dumps(event_data_dict.get("sender"))
-        if event_data_dict.get("sender")
-        else None
-    )
-    metadata_str = (
-        json.dumps(event_data_dict.get("metadata"))
-        if event_data_dict.get("metadata")
-        else None
-    )
-    raw_payload_str = json.dumps({"event": event_type, "data": event_data_dict})
-
-    return (
-        event_type,
-        event_data_dict.get("id"),
-        event_data_dict.get("chatroom_id"),
-        event_data_dict.get("created_at"),
-        sender_dict.get("id"),
-        sender_dict.get("username"),
-        event_data_dict.get("content"),
-        sender_data_str,
-        metadata_str,
-        raw_payload_str,
+    return PreparedEvent(
+        event_type=event_type,
+        event_id=_as_str(event_data_dict.get("id")),
+        chatroom_id=_as_int(event_data_dict.get("chatroom_id")),
+        timestamp=parse_timestamp(event_data_dict.get("created_at")),
+        user_id=_as_int(sender_dict.get("id")),
+        username=sender_dict.get("username"),
+        content=event_data_dict.get("content"),
+        sender_data=event_data_dict.get("sender") or None,
+        metadata=event_data_dict.get("metadata") or None,
+        raw_payload={"event": event_type, "data": event_data_dict},
     )
 
 
-def _prepare_subscription_data(event_data_dict: dict, event_type: str) -> tuple:
+def _prepare_subscription_data(
+    event_data_dict: dict,
+    event_type: str,
+) -> PreparedEvent:
     """Prepare subscription event data for database insertion.
 
     Args:
@@ -109,28 +135,31 @@ def _prepare_subscription_data(event_data_dict: dict, event_type: str) -> tuple:
         event_type (str): The event type
 
     Returns:
-        Tuple: Prepared data for database insertion
+        PreparedEvent: Typed event data ready for a storage backend
 
     """
     username = event_data_dict.get("username", "Unknown")
     months = event_data_dict.get("months", 0)
     content = SUBSCRIPTION_CONTENT_TEMPLATE.format(username=username, months=months)
 
-    return (
-        event_type,
-        None,
-        event_data_dict.get("chatroom_id"),
-        None,
-        None,
-        username,
-        content,
-        json.dumps({"username": username, "months": months}),
-        json.dumps({"months": months}),
-        json.dumps({"event": event_type, "data": event_data_dict}),
+    return PreparedEvent(
+        event_type=event_type,
+        event_id=None,
+        chatroom_id=_as_int(event_data_dict.get("chatroom_id")),
+        timestamp=None,
+        user_id=None,
+        username=username,
+        content=content,
+        sender_data={"username": username, "months": months},
+        metadata={"months": months},
+        raw_payload={"event": event_type, "data": event_data_dict},
     )
 
 
-def _prepare_user_banned_data(event_data_dict: dict, event_type: str) -> tuple:
+def _prepare_user_banned_data(
+    event_data_dict: dict,
+    event_type: str,
+) -> PreparedEvent:
     """Prepare user banned event data for database insertion.
 
     Args:
@@ -138,7 +167,7 @@ def _prepare_user_banned_data(event_data_dict: dict, event_type: str) -> tuple:
         event_type (str): The event type
 
     Returns:
-        Tuple: Prepared data for database insertion
+        PreparedEvent: Typed event data ready for a storage backend
 
     """
     user_dict = event_data_dict.get("user", {})
@@ -159,29 +188,30 @@ def _prepare_user_banned_data(event_data_dict: dict, event_type: str) -> tuple:
             banned_by=banned_by,
         )
 
-    return (
-        event_type,
-        event_data_dict.get("id"),
-        None,
-        event_data_dict.get("expires_at"),
-        user_dict.get("id"),
-        username,
-        content,
-        json.dumps(user_dict),
-        json.dumps(
-            {
-                "banned_by": banned_by_dict,
-                "banned_by_username": banned_by_dict.get("username"),
-                "permanent": event_data_dict.get("permanent"),
-                "duration": event_data_dict.get("duration"),
-                "expires_at": event_data_dict.get("expires_at"),
-            },
-        ),
-        json.dumps({"event": event_type, "data": event_data_dict}),
+    return PreparedEvent(
+        event_type=event_type,
+        event_id=_as_str(event_data_dict.get("id")),
+        chatroom_id=None,
+        timestamp=parse_timestamp(event_data_dict.get("expires_at")),
+        user_id=_as_int(user_dict.get("id")),
+        username=username,
+        content=content,
+        sender_data=user_dict,
+        metadata={
+            "banned_by": banned_by_dict,
+            "banned_by_username": banned_by_dict.get("username"),
+            "permanent": event_data_dict.get("permanent"),
+            "duration": event_data_dict.get("duration"),
+            "expires_at": event_data_dict.get("expires_at"),
+        },
+        raw_payload={"event": event_type, "data": event_data_dict},
     )
 
 
-def _prepare_user_unbanned_data(event_data_dict: dict, event_type: str) -> tuple:
+def _prepare_user_unbanned_data(
+    event_data_dict: dict,
+    event_type: str,
+) -> PreparedEvent:
     """Prepare user unbanned event data for database insertion.
 
     Args:
@@ -189,7 +219,7 @@ def _prepare_user_unbanned_data(event_data_dict: dict, event_type: str) -> tuple
         event_type (str): The event type
 
     Returns:
-        Tuple: Prepared data for database insertion
+        PreparedEvent: Typed event data ready for a storage backend
 
     """
     user_dict = event_data_dict.get("user", {})
@@ -199,27 +229,28 @@ def _prepare_user_unbanned_data(event_data_dict: dict, event_type: str) -> tuple
 
     content = USER_UNBANNED_TEMPLATE.format(username=username, unbanned_by=unbanned_by)
 
-    return (
-        event_type,
-        event_data_dict.get("id"),
-        None,
-        None,
-        user_dict.get("id"),
-        username,
-        content,
-        json.dumps(user_dict),
-        json.dumps(
-            {
-                "unbanned_by": unbanned_by_dict,
-                "unbanned_by_username": unbanned_by_dict.get("username"),
-                "permanent": event_data_dict.get("permanent"),
-            },
-        ),
-        json.dumps({"event": event_type, "data": event_data_dict}),
+    return PreparedEvent(
+        event_type=event_type,
+        event_id=_as_str(event_data_dict.get("id")),
+        chatroom_id=None,
+        timestamp=None,
+        user_id=_as_int(user_dict.get("id")),
+        username=username,
+        content=content,
+        sender_data=user_dict,
+        metadata={
+            "unbanned_by": unbanned_by_dict,
+            "unbanned_by_username": unbanned_by_dict.get("username"),
+            "permanent": event_data_dict.get("permanent"),
+        },
+        raw_payload={"event": event_type, "data": event_data_dict},
     )
 
 
-def _prepare_message_deleted_data(event_data_dict: dict, event_type: str) -> tuple:
+def _prepare_message_deleted_data(
+    event_data_dict: dict,
+    event_type: str,
+) -> PreparedEvent:
     """Prepare message deleted event data for database insertion.
 
     Args:
@@ -227,7 +258,7 @@ def _prepare_message_deleted_data(event_data_dict: dict, event_type: str) -> tup
         event_type (str): The event type
 
     Returns:
-        Tuple: Prepared data for database insertion
+        PreparedEvent: Typed event data ready for a storage backend
 
     """
     message_dict = event_data_dict.get("message", {})
@@ -237,27 +268,28 @@ def _prepare_message_deleted_data(event_data_dict: dict, event_type: str) -> tup
         MESSAGE_DELETED_AI_TEMPLATE if ai_moderated else MESSAGE_DELETED_MANUAL_TEMPLATE
     )
 
-    return (
-        event_type,
-        event_data_dict.get("id"),
-        None,
-        None,
-        None,
-        None,
-        content,
-        None,
-        json.dumps(
-            {
-                "deleted_message_id": message_dict.get("id"),
-                "aiModerated": ai_moderated,
-                "violatedRules": event_data_dict.get("violatedRules", []),
-            },
-        ),
-        json.dumps({"event": event_type, "data": event_data_dict}),
+    return PreparedEvent(
+        event_type=event_type,
+        event_id=_as_str(event_data_dict.get("id")),
+        chatroom_id=None,
+        timestamp=None,
+        user_id=None,
+        username=None,
+        content=content,
+        sender_data=None,
+        metadata={
+            "deleted_message_id": message_dict.get("id"),
+            "aiModerated": ai_moderated,
+            "violatedRules": event_data_dict.get("violatedRules", []),
+        },
+        raw_payload={"event": event_type, "data": event_data_dict},
     )
 
 
-def _prepare_pinned_message_data(event_data_dict: dict, event_type: str) -> tuple:
+def _prepare_pinned_message_data(
+    event_data_dict: dict,
+    event_type: str,
+) -> PreparedEvent:
     """Prepare pinned message created event data for database insertion.
 
     Args:
@@ -265,7 +297,7 @@ def _prepare_pinned_message_data(event_data_dict: dict, event_type: str) -> tupl
         event_type (str): The event type
 
     Returns:
-        Tuple: Prepared data for database insertion
+        PreparedEvent: Typed event data ready for a storage backend
 
     """
     message_dict = event_data_dict.get("message", {})
@@ -275,28 +307,29 @@ def _prepare_pinned_message_data(event_data_dict: dict, event_type: str) -> tupl
     message_content = message_dict.get("content", "")
     content = MESSAGE_PINNED_TEMPLATE.format(content=message_content)
 
-    return (
-        event_type,
-        message_dict.get("id"),
-        message_dict.get("chatroom_id"),
-        message_dict.get("created_at"),
-        sender_dict.get("id"),
-        sender_dict.get("username"),
-        content,
-        json.dumps(sender_dict),
-        json.dumps(
-            {
-                "duration": event_data_dict.get("duration"),
-                "pinnedBy": pinned_by_dict,
-                "pinned_by_username": pinned_by_dict.get("username"),
-                "original_metadata": message_dict.get("metadata"),
-            },
-        ),
-        json.dumps({"event": event_type, "data": event_data_dict}),
+    return PreparedEvent(
+        event_type=event_type,
+        event_id=_as_str(message_dict.get("id")),
+        chatroom_id=_as_int(message_dict.get("chatroom_id")),
+        timestamp=parse_timestamp(message_dict.get("created_at")),
+        user_id=_as_int(sender_dict.get("id")),
+        username=sender_dict.get("username"),
+        content=content,
+        sender_data=sender_dict,
+        metadata={
+            "duration": event_data_dict.get("duration"),
+            "pinnedBy": pinned_by_dict,
+            "pinned_by_username": pinned_by_dict.get("username"),
+            "original_metadata": message_dict.get("metadata"),
+        },
+        raw_payload={"event": event_type, "data": event_data_dict},
     )
 
 
-def _prepare_chat_message_sent_data(event_data_dict: dict, event_type: str) -> tuple:
+def _prepare_chat_message_sent_data(
+    event_data_dict: dict,
+    event_type: str,
+) -> PreparedEvent:
     """Prepare chat message sent event data for database insertion.
 
     Args:
@@ -304,7 +337,7 @@ def _prepare_chat_message_sent_data(event_data_dict: dict, event_type: str) -> t
         event_type (str): The event type
 
     Returns:
-        Tuple: Prepared data for database insertion
+        PreparedEvent: Typed event data ready for a storage backend
 
     """
     message_dict = event_data_dict.get("message", {})
@@ -314,29 +347,28 @@ def _prepare_chat_message_sent_data(event_data_dict: dict, event_type: str) -> t
     message_type = message_dict.get("type", "")
     content = MESSAGE_SENT_TEMPLATE.format(message_type=message_type, action=action)
 
-    timestamp = normalize_timestamp(message_dict.get("created_at"))
-
-    return (
-        event_type,
-        message_dict.get("id"),
-        message_dict.get("chatroom_id"),
-        timestamp,
-        user_dict.get("id"),
-        user_dict.get("username"),
-        content,
-        json.dumps(user_dict),
-        json.dumps(
-            {
-                "message_info": message_dict,
-                "months_subscribed": message_dict.get("months_subscribed"),
-                "subscriptions_count": message_dict.get("subscriptions_count"),
-            },
-        ),
-        json.dumps({"event": event_type, "data": event_data_dict}),
+    return PreparedEvent(
+        event_type=event_type,
+        event_id=_as_str(message_dict.get("id")),
+        chatroom_id=_as_int(message_dict.get("chatroom_id")),
+        timestamp=parse_timestamp(message_dict.get("created_at")),
+        user_id=_as_int(user_dict.get("id")),
+        username=user_dict.get("username"),
+        content=content,
+        sender_data=user_dict,
+        metadata={
+            "message_info": message_dict,
+            "months_subscribed": message_dict.get("months_subscribed"),
+            "subscriptions_count": message_dict.get("subscriptions_count"),
+        },
+        raw_payload={"event": event_type, "data": event_data_dict},
     )
 
 
-def _prepare_chatroom_updated_data(event_data_dict: dict, event_type: str) -> tuple:
+def _prepare_chatroom_updated_data(
+    event_data_dict: dict,
+    event_type: str,
+) -> PreparedEvent:
     """Prepare chatroom updated event data for database insertion.
 
     Args:
@@ -344,37 +376,36 @@ def _prepare_chatroom_updated_data(event_data_dict: dict, event_type: str) -> tu
         event_type (str): The event type
 
     Returns:
-        Tuple: Prepared data for database insertion
+        PreparedEvent: Typed event data ready for a storage backend
 
     """
-    content = CHATROOM_UPDATED_TEMPLATE
-
-    return (
-        event_type,
-        event_data_dict.get("id"),
-        None,
-        None,
-        None,
-        None,
-        content,
-        None,
-        json.dumps(
-            {
-                "slow_mode": event_data_dict.get("slow_mode"),
-                "subscribers_mode": event_data_dict.get("subscribers_mode"),
-                "followers_mode": event_data_dict.get("followers_mode"),
-                "emotes_mode": event_data_dict.get("emotes_mode"),
-                "advanced_bot_protection": event_data_dict.get(
-                    "advanced_bot_protection",
-                ),
-                "account_age": event_data_dict.get("account_age"),
-            },
-        ),
-        json.dumps({"event": event_type, "data": event_data_dict}),
+    return PreparedEvent(
+        event_type=event_type,
+        event_id=_as_str(event_data_dict.get("id")),
+        chatroom_id=None,
+        timestamp=None,
+        user_id=None,
+        username=None,
+        content=CHATROOM_UPDATED_TEMPLATE,
+        sender_data=None,
+        metadata={
+            "slow_mode": event_data_dict.get("slow_mode"),
+            "subscribers_mode": event_data_dict.get("subscribers_mode"),
+            "followers_mode": event_data_dict.get("followers_mode"),
+            "emotes_mode": event_data_dict.get("emotes_mode"),
+            "advanced_bot_protection": event_data_dict.get(
+                "advanced_bot_protection",
+            ),
+            "account_age": event_data_dict.get("account_age"),
+        },
+        raw_payload={"event": event_type, "data": event_data_dict},
     )
 
 
-def _prepare_stream_host_data(event_data_dict: dict, event_type: str) -> tuple:
+def _prepare_stream_host_data(
+    event_data_dict: dict,
+    event_type: str,
+) -> PreparedEvent:
     """Prepare stream host event data for database insertion.
 
     Args:
@@ -382,7 +413,7 @@ def _prepare_stream_host_data(event_data_dict: dict, event_type: str) -> tuple:
         event_type (str): The event type
 
     Returns:
-        Tuple: Prepared data for database insertion
+        PreparedEvent: Typed event data ready for a storage backend
 
     """
     host_username = event_data_dict.get("host_username", "Unknown")
@@ -392,30 +423,28 @@ def _prepare_stream_host_data(event_data_dict: dict, event_type: str) -> tuple:
         number_viewers=number_viewers,
     )
 
-    return (
-        event_type,
-        None,
-        event_data_dict.get("chatroom_id"),
-        None,
-        None,
-        host_username,
-        content,
-        None,
-        json.dumps(
-            {
-                "host_username": host_username,
-                "number_viewers": number_viewers,
-                "optional_message": event_data_dict.get("optional_message"),
-            },
-        ),
-        json.dumps({"event": event_type, "data": event_data_dict}),
+    return PreparedEvent(
+        event_type=event_type,
+        event_id=None,
+        chatroom_id=_as_int(event_data_dict.get("chatroom_id")),
+        timestamp=None,
+        user_id=None,
+        username=host_username,
+        content=content,
+        sender_data=None,
+        metadata={
+            "host_username": host_username,
+            "number_viewers": number_viewers,
+            "optional_message": event_data_dict.get("optional_message"),
+        },
+        raw_payload={"event": event_type, "data": event_data_dict},
     )
 
 
 def _prepare_pinned_message_deleted_data(
     event_data_dict: dict,
     event_type: str,
-) -> tuple:
+) -> PreparedEvent:
     """Prepare pinned message deleted event data for database insertion.
 
     Args:
@@ -423,26 +452,27 @@ def _prepare_pinned_message_deleted_data(
         event_type (str): The event type
 
     Returns:
-        Tuple: Prepared data for database insertion
+        PreparedEvent: Typed event data ready for a storage backend
 
     """
-    content = PINNED_MESSAGE_DELETED_TEMPLATE
-
-    return (
-        event_type,
-        None,
-        None,
-        None,
-        None,
-        None,
-        content,
-        None,
-        json.dumps({}),  # Empty data array from API
-        json.dumps({"event": event_type, "data": event_data_dict}),
+    return PreparedEvent(
+        event_type=event_type,
+        event_id=None,
+        chatroom_id=None,
+        timestamp=None,
+        user_id=None,
+        username=None,
+        content=PINNED_MESSAGE_DELETED_TEMPLATE,
+        sender_data=None,
+        metadata={},  # Empty data array from API
+        raw_payload={"event": event_type, "data": event_data_dict},
     )
 
 
-def _prepare_chatroom_clear_data(event_data_dict: dict, event_type: str) -> tuple:
+def _prepare_chatroom_clear_data(
+    event_data_dict: dict,
+    event_type: str,
+) -> PreparedEvent:
     """Prepare chatroom clear event data for database insertion.
 
     Args:
@@ -450,26 +480,27 @@ def _prepare_chatroom_clear_data(event_data_dict: dict, event_type: str) -> tupl
         event_type (str): The event type
 
     Returns:
-        Tuple: Prepared data for database insertion
+        PreparedEvent: Typed event data ready for a storage backend
 
     """
-    content = CHATROOM_CLEAR_TEMPLATE
-
-    return (
-        event_type,
-        event_data_dict.get("id"),
-        None,
-        None,
-        None,
-        None,
-        content,
-        None,
-        json.dumps({"clear_id": event_data_dict.get("id")}),
-        json.dumps({"event": event_type, "data": event_data_dict}),
+    return PreparedEvent(
+        event_type=event_type,
+        event_id=_as_str(event_data_dict.get("id")),
+        chatroom_id=None,
+        timestamp=None,
+        user_id=None,
+        username=None,
+        content=CHATROOM_CLEAR_TEMPLATE,
+        sender_data=None,
+        metadata={"clear_id": event_data_dict.get("id")},
+        raw_payload={"event": event_type, "data": event_data_dict},
     )
 
 
-def _prepare_generic_data(event_data_dict: dict, event_type: str) -> tuple:
+def _prepare_generic_data(
+    event_data_dict: dict,
+    event_type: str,
+) -> PreparedEvent:
     """Prepare generic event data for database insertion.
 
     Args:
@@ -477,18 +508,18 @@ def _prepare_generic_data(event_data_dict: dict, event_type: str) -> tuple:
         event_type (str): The event type
 
     Returns:
-        Tuple: Prepared data for database insertion
+        PreparedEvent: Typed event data ready for a storage backend
 
     """
-    return (
-        event_type,
-        event_data_dict.get("id"),
-        event_data_dict.get("chatroom_id"),
-        event_data_dict.get("created_at"),
-        None,
-        event_data_dict.get("username"),
-        str(event_data_dict),  # Stringify the data for unknown event types
-        None,
-        json.dumps(event_data_dict),
-        json.dumps({"event": event_type, "data": event_data_dict}),
+    return PreparedEvent(
+        event_type=event_type,
+        event_id=_as_str(event_data_dict.get("id")),
+        chatroom_id=_as_int(event_data_dict.get("chatroom_id")),
+        timestamp=parse_timestamp(event_data_dict.get("created_at")),
+        user_id=None,
+        username=event_data_dict.get("username"),
+        content=str(event_data_dict),  # Stringify the data for unknown event types
+        sender_data=None,
+        metadata=event_data_dict,
+        raw_payload={"event": event_type, "data": event_data_dict},
     )
